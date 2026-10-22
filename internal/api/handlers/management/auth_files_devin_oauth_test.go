@@ -254,3 +254,72 @@ func TestWaitDevinOAuthCallbackExpiredContext(t *testing.T) {
 		t.Fatalf("error = %v", errWait)
 	}
 }
+
+func TestWaitDevinOAuthCallbackStopsWhenSessionCancelled(t *testing.T) {
+	const state = "devin-session-cancelled"
+	RegisterOAuthSession(state, "devin")
+	path := filepath.Join(t.TempDir(), ".oauth-devin-"+state+".oauth")
+	done := make(chan error, 1)
+	go func() {
+		_, errWait := waitDevinOAuthCallback(context.Background(), path, state)
+		done <- errWait
+	}()
+	if !CancelOAuthSession(state) {
+		t.Fatal("session was not pending")
+	}
+	select {
+	case errWait := <-done:
+		if !errors.Is(errWait, errOAuthSessionNotPending) {
+			t.Fatalf("error = %v", errWait)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waiter did not stop after session cancellation")
+	}
+}
+
+func TestWaitDevinOAuthCallbackRetriesTransientReadErrors(t *testing.T) {
+	const state = "devin-transient-read"
+	RegisterOAuthSession(state, "devin")
+	defer CompleteOAuthSession(state)
+
+	path := filepath.Join(t.TempDir(), ".oauth-devin-"+state+".oauth")
+	// A directory at the callback path produces a read error that does not
+	// match fs.ErrNotExist, standing in for a transient read failure (for
+	// example while another process briefly holds the published file open).
+	if errMkdir := os.Mkdir(path, 0o700); errMkdir != nil {
+		t.Fatal(errMkdir)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type waitResult struct {
+		payload *oauthCallbackFilePayload
+		err     error
+	}
+	done := make(chan waitResult, 1)
+	go func() {
+		payload, errWait := waitDevinOAuthCallback(ctx, path, state)
+		done <- waitResult{payload: payload, err: errWait}
+	}()
+	select {
+	case result := <-done:
+		t.Fatalf("waiter aborted on a transient read error: payload=%+v err=%v", result.payload, result.err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	if errRemove := os.Remove(path); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	if errWrite := os.WriteFile(path, []byte(`{"state":"`+state+`","code":"code"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("wait error = %v", result.err)
+		}
+		if result.payload == nil || result.payload.Code != "code" {
+			t.Fatalf("payload = %+v", result.payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waiter did not pick up the callback after the transient error cleared")
+	}
+}

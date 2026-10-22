@@ -150,9 +150,10 @@ func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCall
 			}
 			return &result, nil
 		}
-		if !errors.Is(errRead, os.ErrNotExist) {
-			return nil, errors.New("Failed to read OAuth callback")
-		}
+		// Treat any read error as "not ready yet": the callback file may not
+		// exist yet, and a freshly published file can briefly fail to open
+		// (for example while another process has it open). Sibling OAuth
+		// waiters retry the same way instead of failing the login.
 		select {
 		case <-ctx.Done():
 			return nil, errors.New("Timeout waiting for OAuth callback")
