@@ -1,0 +1,20 @@
+# Managed by CLIProxyAPI deployment/cpap-gateway/install.sh - do not edit.
+[Unit]
+Description=Check for a new CLIProxyAPI release every 5 minutes
+Documentation=https://github.com/SCNU-PIONEER/CLIProxyAPI
+
+[Timer]
+# The first check runs five minutes after the timer is activated. Later checks
+# are relative to when the service is activated (started), not when a run
+# finishes, so enabling the timer never triggers an immediate deployment.
+OnActiveSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60
+AccuracySec=30s
+Unit=cpap-deploy.service
+
+# Persistent= is intentionally not set: it only applies to OnCalendar timers,
+# and a five-minute poll does not need to catch up after downtime.
+
+[Install]
+WantedBy=timers.target
