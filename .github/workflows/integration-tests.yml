@@ -21,8 +21,11 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race-check Home reconnect regression
+        if: ${{ !cancelled() }}
         run: go test -race ./sdk/cliproxy -run 'TestServeInitialOverlayPluginConnectionToleratesRepeatedFreshCommandProbes|TestServiceInitialOverlayStagesPluginWritesUntilReady' -count=3
       - name: Race-check Home blocked RPC cancellation
+        if: ${{ !cancelled() }}
         run: go test -race ./internal/home -run '^Test(ClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry|RebalanceTransportTracker.*|RebalanceCommandCancelAbortsBlockedTransport)$' -count=3
       - name: Build
+        if: ${{ !cancelled() }}
         run: go build -o "${RUNNER_TEMP}/cli-proxy-api" ./cmd/server
