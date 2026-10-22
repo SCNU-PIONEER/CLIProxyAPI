@@ -47,6 +47,9 @@ jobs:
       - name: Race-check Plus credentials and OAuth
         if: ${{ !cancelled() }}
         run: go test -race ./sdk/cliproxy ./sdk/cliproxy/auth ./sdk/auth ./internal/runtime/executor ./internal/auth/cursor/proto ./internal/api/handlers/management ./internal/watcher/synthesizer -run 'Plus|Kiro|BT|H2Stream|LoginChallenge|GitLab|Qoder|CodeArts|JoyCode|Cursor' -count=1
+      - name: Race-check OAuth persistence fixture isolation
+        if: ${{ !cancelled() }}
+        run: go test -race ./internal/api/handlers/management -run '^TestPlusOAuth(HandlersAreIsolated|LoginMetadataWhitelist|TerminalStatusJoinsCommitWrite)$' -count=20
       - name: Race-check Kiro token-file reload stability
         if: ${{ !cancelled() }}
         run: go test -race ./sdk/cliproxy -run '^TestKiroTokenFile' -count=20
