@@ -1,0 +1,29 @@
+name: Release deployment tests
+
+on:
+  pull_request:
+    paths:
+      - 'deployment/cpap-gateway/**'
+      - '.github/workflows/deploy-tests.yml'
+  push:
+    branches: [main, feat/release-pull-deploy]
+    paths:
+      - 'deployment/cpap-gateway/**'
+      - '.github/workflows/deploy-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run offline deployment regression tests
+        run: python -m unittest discover -s deployment/cpap-gateway -p 'test_*.py' -v
+      - name: Check installer shell syntax
+        run: bash -n deployment/cpap-gateway/install.sh

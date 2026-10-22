@@ -1,0 +1,26 @@
+# Managed by CLIProxyAPI deployment/cpap-gateway/install.sh - do not edit.
+[Unit]
+Description=CLIProxyAPI release-pull deploy check
+Documentation=https://github.com/SCNU-PIONEER/CLIProxyAPI
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/root
+Environment=PYTHONUNBUFFERED=1
+SyslogIdentifier=cpap-deploy
+ExecStart=/usr/local/bin/cpap-deploy --latest
+TimeoutStartSec=20min
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+# ProtectHome must stay off: the app, config, auth material and state are under /root.
+ProtectHome=no
+Restart=no
+
+# The timer is the only supported entry point; this unit has no install section.
