@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -66,6 +67,11 @@ func loadToolSearchGolden(t *testing.T) (toolSearchGoldenFixtures, map[string]to
 		if errRead != nil {
 			t.Fatalf("read %s: %v", name, errRead)
 		}
+		// The golden was produced from LF fixtures. A CRLF checkout (git
+		// core.autocrlf=true) would otherwise leak \r\n through the raw tool
+		// declarations the translator copies verbatim and fail the byte-exact
+		// comparison on Windows alone.
+		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 		if errUnmarshal := json.Unmarshal(raw, target); errUnmarshal != nil {
 			t.Fatalf("decode %s: %v", name, errUnmarshal)
 		}

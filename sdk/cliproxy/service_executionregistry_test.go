@@ -738,6 +738,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 	freshCommandProbe := make(chan struct{})
 	allowAck := make(chan struct{})
 	stop := make(chan struct{})
+	var pluginSyncOnce, pluginTasksOnce, freshCommandProbeOnce sync.Once
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
@@ -746,7 +747,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 			if errAccept != nil {
 				return
 			}
-			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop)
+			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop, &pluginSyncOnce, &pluginTasksOnce, &freshCommandProbeOnce)
 		}
 	}()
 	t.Cleanup(func() {
@@ -2516,7 +2517,7 @@ func serveStalePreACKPluginConnection(conn net.Conn, subscriptions *atomic.Int32
 	}
 }
 
-func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, allowAck chan struct{}, stop chan struct{}) {
+func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, allowAck chan struct{}, stop chan struct{}, pluginSyncOnce *sync.Once, pluginTasksOnce *sync.Once, freshCommandProbeOnce *sync.Once) {
 	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
@@ -2538,7 +2539,7 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 			if home.Current() != nil {
 				return
 			}
-			close(pluginSync)
+			pluginSyncOnce.Do(func() { close(pluginSync) })
 			payload := fmt.Sprintf(`{"schema_version":1,"expires_at":%q,"items":[]}`, time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
@@ -2554,13 +2555,13 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 				return
 			}
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "plugin-tasks":
-			close(pluginTasks)
+			pluginTasksOnce.Do(func() { close(pluginTasks) })
 			payload := `[{"id":1,"operation":"delete","plugin_id":"plugin-a"}]`
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
 			}
 		case len(args) > 0 && strings.EqualFold(args[0], "PING"):
-			close(freshCommandProbe)
+			freshCommandProbeOnce.Do(func() { close(freshCommandProbe) })
 			if _, errWrite := io.WriteString(conn, "+PONG\r\n"); errWrite != nil {
 				return
 			}
@@ -3032,4 +3033,56 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Home config worker did not stop")
 	}
+}
+
+// TestServeInitialOverlayPluginConnectionToleratesRepeatedFreshCommandProbes
+// guards the fake Home command server against Home reconnecting after a
+// subscription lifetime ends. Every lifetime probes the fresh command
+// connection with PING, so the shared probe signal must be closed idempotently.
+func TestServeInitialOverlayPluginConnectionToleratesRepeatedFreshCommandProbes(t *testing.T) {
+	pluginSync := make(chan struct{})
+	pluginStatus := make(chan struct{}, 2)
+	pluginTasks := make(chan struct{})
+	freshCommandProbe := make(chan struct{})
+	allowAck := make(chan struct{})
+	stop := make(chan struct{})
+	var pluginSyncOnce, pluginTasksOnce, freshCommandProbeOnce sync.Once
+	t.Cleanup(func() { close(stop) })
+
+	probe := func(attempt int) {
+		serverConn, clientConn := net.Pipe()
+		panicked := make(chan any, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panicked <- recovered
+				}
+			}()
+			serveInitialOverlayPluginConnection(serverConn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop, &pluginSyncOnce, &pluginTasksOnce, &freshCommandProbeOnce)
+		}()
+		if _, errWrite := clientConn.Write([]byte("*1\r\n$4\r\nPING\r\n")); errWrite != nil {
+			t.Fatalf("attempt %d: write PING: %v", attempt, errWrite)
+		}
+		reply := make([]byte, len("+PONG\r\n"))
+		_, errRead := io.ReadFull(clientConn, reply)
+		if errClose := clientConn.Close(); errClose != nil {
+			t.Fatalf("attempt %d: close client connection: %v", attempt, errClose)
+		}
+		<-done
+		select {
+		case recovered := <-panicked:
+			t.Fatalf("attempt %d: serveInitialOverlayPluginConnection panicked on a repeated fresh command probe: %v", attempt, recovered)
+		default:
+		}
+		if errRead != nil {
+			t.Fatalf("attempt %d: read PING reply: %v", attempt, errRead)
+		}
+		if string(reply) != "+PONG\r\n" {
+			t.Fatalf("attempt %d: PING reply = %q, want %q", attempt, reply, "+PONG\r\n")
+		}
+	}
+	probe(1)
+	probe(2)
 }
