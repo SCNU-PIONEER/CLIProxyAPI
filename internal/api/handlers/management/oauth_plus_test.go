@@ -35,6 +35,11 @@ func newPlusOAuthTestHandler(t *testing.T, authenticators ...sdkAuth.Authenticat
 	t.Helper()
 	authDir := t.TempDir()
 	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	// saveTokenRecord lazily falls back to the process-global token store,
+	// whose base directory is mutated by every save. Keep each test handler on
+	// its own store so a worker from one handler can never redirect another
+	// handler's pending write into the wrong TempDir.
+	h.tokenStore = sdkAuth.NewFileTokenStore()
 	manager := sdkAuth.NewManager(nil)
 	for _, authenticator := range authenticators {
 		manager.Register(authenticator)

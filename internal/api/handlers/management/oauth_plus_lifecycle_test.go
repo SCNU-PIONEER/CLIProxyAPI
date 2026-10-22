@@ -267,6 +267,71 @@ func TestPlusOAuthLoginMetadataWhitelist(t *testing.T) {
 	})
 }
 
+// blockingSaveStore lets a test hold the login worker inside persistence and
+// prove that the public terminal status is only published after the write
+// completed.
+type blockingSaveStore struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSaveStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
+
+func (s *blockingSaveStore) Save(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+		return "saved.json", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (s *blockingSaveStore) Delete(context.Context, string) error { return nil }
+
+// TestPlusOAuthTerminalStatusJoinsCommitWrite pins the invariant the cleanup
+// fixtures rely on: a session is only reported ok once its worker has finished
+// persisting the auth file. Status ok is therefore a persistence completion
+// barrier, not a goroutine-exit barrier (timers and cleanup may still run).
+func TestPlusOAuthTerminalStatusJoinsCommitWrite(t *testing.T) {
+	h, _ := newPlusOAuthTestHandler(t, &fakePlusAuthenticator{
+		provider: "codebuddy",
+		login: func(ctx context.Context, cfg *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
+			return newFakePlusAuth("join.json"), nil
+		},
+	})
+	store := &blockingSaveStore{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.tokenStore = store
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	t.Cleanup(release) // unblock the worker even if an assertion fails first
+
+	start := startPlusSessionRequest(t, h, "codebuddy")
+	state, _ := start["state"].(string)
+	if state == "" {
+		t.Fatalf("start response missing state: %v", start)
+	}
+	select {
+	case <-store.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("login worker never reached persistence")
+	}
+	if payload, ok := h.plusOAuthStore().status(state); ok && payload["status"] == "ok" {
+		t.Fatalf("session reported ok before persistence completed: %v", payload)
+	}
+	cancelled, committing, known := h.plusOAuthStore().cancel(state)
+	if !known || !committing || cancelled {
+		t.Fatalf("worker must be committing while Save is in flight: known=%v committing=%v cancelled=%v", known, committing, cancelled)
+	}
+	release()
+	waitPlusStatus(t, h.plusOAuthStore(), state, func(view map[string]any) bool {
+		return view["status"] == "ok"
+	})
+}
+
 // TestPlusOAuthHandlersAreIsolated covers the requirement that sessions cannot
 // be observed or cancelled through another handler instance.
 func TestPlusOAuthHandlersAreIsolated(t *testing.T) {
@@ -299,9 +364,19 @@ func TestPlusOAuthHandlersAreIsolated(t *testing.T) {
 	if closedRecorder.Code != http.StatusServiceUnavailable || closedPayload["error"] != "oauth coordinator is closed" {
 		t.Fatalf("closed coordinator must refuse starts: code=%d body=%s", closedRecorder.Code, closedRecorder.Body.String())
 	}
-	if recorder, _ := startPlusOAuthRawRequest(t, hB, "/v8/management/oauth/auth-url?provider=codebuddy"); recorder.Code != http.StatusOK {
-		t.Fatalf("handler B must stay usable: %d %s", recorder.Code, recorder.Body.String())
+	recorderB, payloadB := startPlusOAuthRawRequest(t, hB, "/v8/management/oauth/auth-url?provider=codebuddy")
+	if recorderB.Code != http.StatusOK {
+		t.Fatalf("handler B must stay usable: %d %s", recorderB.Code, recorderB.Body.String())
 	}
+	// Handler B's login worker persists its auth file asynchronously; join its
+	// terminal commit before t.TempDir cleanup removes the auth directories.
+	stateB, _ := payloadB["state"].(string)
+	if stateB == "" {
+		t.Fatalf("handler B start response missing state: %v", payloadB)
+	}
+	waitPlusStatus(t, hB.plusOAuthStore(), stateB, func(view map[string]any) bool {
+		return view["status"] == "ok"
+	})
 }
 
 // TestPlusOAuthCloseAndCancelPending covers shutdown cancellation plus the
