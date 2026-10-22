@@ -60,8 +60,6 @@ func TestBuildBTConfigAuthKeepsSecretsOutOfMetadata(t *testing.T) {
 
 func TestStartPlusCredentialActivationRegistersAndRemovesBT(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
-
 	var mu sync.Mutex
 	logins := 0
 	plusBTLogin = func(ctx context.Context, phone, password, proxyURL string) (*btauth.BTTokenStorage, error) {
@@ -85,11 +83,18 @@ func TestStartPlusCredentialActivationRegistersAndRemovesBT(t *testing.T) {
 	id, _ := btConfigAuthIdentity(entry)
 
 	svc := &Service{cfg: cfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc.startPlusCredentialActivation(ctx, cfg)
+	// The activator WaitGroup joins both the activation and any stale-delete
+	// worker, so once it drains the manager state is final without polling.
+	svc.plusCredentialWG.Wait()
 
-	registered, ok := svc.waitForRegisteredPlusAuth(ctx, id, 3*time.Second)
+	registered, ok := svc.coreManager.GetByID(id)
 	if !ok {
 		t.Fatal("BT config credential was not registered")
 	}
@@ -101,15 +106,9 @@ func TestStartPlusCredentialActivationRegistersAndRemovesBT(t *testing.T) {
 	}
 
 	svc.startPlusCredentialActivation(ctx, &config.Config{})
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, exists := svc.coreManager.GetByID(id); !exists {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("removed BT config credential was not deleted")
-		}
-		time.Sleep(10 * time.Millisecond)
+	svc.plusCredentialWG.Wait()
+	if _, exists := svc.coreManager.GetByID(id); exists {
+		t.Fatal("removed BT config credential was not deleted")
 	}
 
 	mu.Lock()
@@ -118,11 +117,8 @@ func TestStartPlusCredentialActivationRegistersAndRemovesBT(t *testing.T) {
 		t.Fatalf("login calls = %d, want 1 (existing credential must be reused)", logins)
 	}
 }
-
 func TestStartPlusCredentialActivationReusesBTTokensAcrossReload(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
-
 	var mu sync.Mutex
 	logins := 0
 	plusBTLogin = func(ctx context.Context, phone, password, proxyURL string) (*btauth.BTTokenStorage, error) {
@@ -135,11 +131,16 @@ func TestStartPlusCredentialActivationReusesBTTokensAcrossReload(t *testing.T) {
 	entry := config.BTKey{Phone: "13800000000", Password: "cGFzcw==", Prefix: "bt"}
 	id, _ := btConfigAuthIdentity(entry)
 	svc := &Service{cfg: &config.Config{BTKey: []config.BTKey{entry}}, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	svc.startPlusCredentialActivation(ctx, svc.cfg)
-	if _, ok := svc.waitForRegisteredPlusAuth(ctx, id, 3*time.Second); !ok {
+	svc.plusCredentialWG.Wait()
+	if _, ok := svc.coreManager.GetByID(id); !ok {
 		t.Fatal("BT config credential was not registered")
 	}
 
@@ -150,16 +151,10 @@ func TestStartPlusCredentialActivationReusesBTTokensAcrossReload(t *testing.T) {
 	reloaded.Headers = map[string]string{"X-Team": "beta"}
 	svc.cfg = &config.Config{BTKey: []config.BTKey{reloaded}}
 	svc.startPlusCredentialActivation(ctx, svc.cfg)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		current, ok := svc.coreManager.GetByID(id)
-		if ok && current.Attributes["priority"] == "5" && current.Attributes["header:X-Team"] == "beta" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("reloaded presentation was not applied, auth = %+v", current)
-		}
-		time.Sleep(10 * time.Millisecond)
+	svc.plusCredentialWG.Wait()
+	current, ok := svc.coreManager.GetByID(id)
+	if !ok || current.Attributes["priority"] != "5" || current.Attributes["header:X-Team"] != "beta" {
+		t.Fatalf("reloaded presentation was not applied, auth = %+v", current)
 	}
 
 	mu.Lock()
@@ -168,10 +163,8 @@ func TestStartPlusCredentialActivationReusesBTTokensAcrossReload(t *testing.T) {
 		t.Fatalf("login calls = %d, want 1 (tokens reused across reload)", logins)
 	}
 }
-
 func TestStartPlusCredentialActivationFencesStaleLogin(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -187,6 +180,10 @@ func TestStartPlusCredentialActivationFencesStaleLogin(t *testing.T) {
 	entry := config.BTKey{Phone: "13800000000", Password: "cGFzcw=="}
 	id, _ := btConfigAuthIdentity(entry)
 	svc := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -199,16 +196,13 @@ func TestStartPlusCredentialActivationFencesStaleLogin(t *testing.T) {
 	// The entry is removed while its login is still in flight.
 	svc.startPlusCredentialActivation(ctx, &config.Config{})
 	close(release)
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if _, ok := svc.coreManager.GetByID(id); ok {
-			t.Fatal("stale credential was registered after its config entry was removed")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Joining the activator proves the stale login finished; the generation
+	// check must have discarded its result without polling for absence.
+	svc.plusCredentialWG.Wait()
+	if _, ok := svc.coreManager.GetByID(id); ok {
+		t.Fatal("stale credential was registered after its config entry was removed")
 	}
 }
-
 func TestSynthesizeKiroConfigAuthsKeepsInlineEntry(t *testing.T) {
 	cfg := &config.Config{KiroKey: []config.KiroKey{{
 		AccessToken:       "access-token",
@@ -235,7 +229,6 @@ func TestSynthesizeKiroConfigAuthsKeepsInlineEntry(t *testing.T) {
 
 func TestConfigReloadActivatesAndRemovesBTViaApplyConfigUpdate(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
 	plusBTLogin = func(ctx context.Context, phone, password, proxyURL string) (*btauth.BTTokenStorage, error) {
 		return &btauth.BTTokenStorage{UID: "uid-reload", AccessKey: "ak-reload", ServerID: "sid-reload", Type: "bt"}, nil
 	}
@@ -244,13 +237,18 @@ func TestConfigReloadActivatesAndRemovesBTViaApplyConfigUpdate(t *testing.T) {
 	id, _ := btConfigAuthIdentity(entry)
 	baseCfg := &config.Config{BTKey: []config.BTKey{entry}}
 	svc := &Service{cfg: baseCfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if !svc.applyConfigUpdateWithAuthSynthesis(ctx, baseCfg, true) {
 		t.Fatal("initial config update was not applied")
 	}
-	if _, ok := svc.waitForRegisteredPlusAuth(ctx, id, 5*time.Second); !ok {
+	svc.plusCredentialWG.Wait()
+	if _, ok := svc.coreManager.GetByID(id); !ok {
 		t.Fatal("BT config credential was not activated by config update")
 	}
 
@@ -258,21 +256,13 @@ func TestConfigReloadActivatesAndRemovesBTViaApplyConfigUpdate(t *testing.T) {
 	if !svc.applyConfigUpdateWithAuthSynthesis(ctx, nextCfg, true) {
 		t.Fatal("removal config update was not applied")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, exists := svc.coreManager.GetByID(id); !exists {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("BT config credential survived config removal")
-		}
-		time.Sleep(10 * time.Millisecond)
+	svc.plusCredentialWG.Wait()
+	if _, exists := svc.coreManager.GetByID(id); exists {
+		t.Fatal("BT config credential survived config removal")
 	}
 }
-
 func TestStartPlusCredentialActivationRefreshesKiroRefreshOnlyCredential(t *testing.T) {
 	originalRefresh := plusKiroForceRefresh
-	defer func() { plusKiroForceRefresh = originalRefresh }()
 	refreshed := make(chan string, 1)
 	plusKiroForceRefresh = func(ctx context.Context, s *Service, id string) (*coreauth.Auth, error) {
 		select {
@@ -285,6 +275,10 @@ func TestStartPlusCredentialActivationRefreshesKiroRefreshOnlyCredential(t *test
 	entry := config.KiroKey{RefreshToken: "refresh-only", ProfileArn: "arn:aws:codewhisperer:us-east-1:1:profile/test", Region: "us-east-1"}
 	cfg := &config.Config{KiroKey: []config.KiroKey{entry}}
 	svc := &Service{cfg: cfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusKiroForceRefresh = originalRefresh
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -321,6 +315,7 @@ func TestConfigReloadUpdatesKiroFingerprintConfig(t *testing.T) {
 		KiroHash:            "hash-one",
 	}}
 	svc := &Service{cfg: first, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer svc.stopPlusCredentialActivation()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -382,19 +377,23 @@ func TestKiroTokenFileChangeReactivatesConfigCredential(t *testing.T) {
 	defer svc.stopPlusCredentialActivation()
 	waitAccessToken := func(want string) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
 		for {
 			current, ok := svc.coreManager.GetByID(id)
 			if ok && metaString(current.Metadata["access_token"]) == want {
 				return
 			}
-			if time.Now().After(deadline) {
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
 				if current == nil {
 					t.Fatalf("kiro config credential never registered (want token %q)", want)
 				}
 				t.Fatalf("kiro config credential token = %q, want %q", metaString(current.Metadata["access_token"]), want)
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	waitAccessToken("first-access")
@@ -403,7 +402,10 @@ func TestKiroTokenFileChangeReactivatesConfigCredential(t *testing.T) {
 
 	// The new ID is only stable while the token file contents are identical, so
 	// locate the re-synthesized credential instead of reusing the first ID.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		auths := synthesizeKiroConfigAuths(cfg)
 		if len(auths) == 1 {
@@ -411,9 +413,10 @@ func TestKiroTokenFileChangeReactivatesConfigCredential(t *testing.T) {
 				return
 			}
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
 			t.Fatal("token file change was not applied without a config reload")
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }

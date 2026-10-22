@@ -43,7 +43,6 @@ func (s *plusCredentialSpyStore) saveCount() int {
 // removed its config entry has already deleted the credential.
 func TestPlusCredentialStaleAddCannotResurrectRemovedCredential(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
 
 	loginStarted := make(chan struct{}, 1)
 	releaseLogin := make(chan struct{})
@@ -59,6 +58,10 @@ func TestPlusCredentialStaleAddCannotResurrectRemovedCredential(t *testing.T) {
 	entry := config.BTKey{Phone: "13800000000", Password: "cGFzcw=="}
 	id, _ := btConfigAuthIdentity(entry)
 	svc := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -80,7 +83,13 @@ func TestPlusCredentialStaleAddCannotResurrectRemovedCredential(t *testing.T) {
 			<-releaseParked
 		}
 	}
+	// LIFO order: the releases run first, then stop joins the delete worker and
+	// activation, then the test-global seam is cleared. This keeps failure paths
+	// from wedging the join on a parked publication.
 	defer func() { plusCredentialUpdateHook = nil }()
+	defer svc.stopPlusCredentialActivation()
+	defer closeOnce(releaseParked)
+	defer closeOnce(releaseLogin)
 
 	close(releaseLogin)
 	select {
@@ -92,19 +101,20 @@ func TestPlusCredentialStaleAddCannotResurrectRemovedCredential(t *testing.T) {
 	// The config entry disappears while the stale add is parked.
 	svc.startPlusCredentialActivation(ctx, &config.Config{})
 	close(releaseParked)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := svc.coreManager.GetByID(id); ok {
-			t.Fatal("stale add resurrected a credential removed from config")
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Joining the activator drains the delete worker and the fenced activation;
+	// the stale add can only have been discarded, never applied after the delete.
+	svc.plusCredentialWG.Wait()
+	if _, ok := svc.coreManager.GetByID(id); ok {
+		t.Fatal("stale add resurrected a credential removed from config")
 	}
 }
-
-// H2: once the service stops, later activations (including watcher retriggers)
-// must be refused instead of spawning uncancelled work.
 func TestPlusCredentialActivationFencedAfterStop(t *testing.T) {
+	originalLogin := plusBTLogin
+	plusBTLogin = func(context.Context, string, string, string) (*btauth.BTTokenStorage, error) {
+		return &btauth.BTTokenStorage{UID: "uid-first", AccessKey: "ak-first", ServerID: "sid", Type: "bt"}, nil
+	}
+	defer func() { plusBTLogin = originalLogin }()
+
 	svc := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
 	ctx := context.Background()
 	first := config.BTKey{Phone: "13800000000", Password: "cGFzcw=="}
@@ -114,15 +124,12 @@ func TestPlusCredentialActivationFencedAfterStop(t *testing.T) {
 	second := config.BTKey{Phone: "13900000000", Password: "cGFzcw=="}
 	secondID, _ := btConfigAuthIdentity(second)
 	svc.startPlusCredentialActivation(ctx, &config.Config{BTKey: []config.BTKey{second}})
-	time.Sleep(150 * time.Millisecond)
+	// start refuses synchronously after the fence, so no activation goroutine was
+	// spawned and the manager state is final without polling.
 	if _, ok := svc.coreManager.GetByID(secondID); ok {
 		t.Fatal("activation started after stop registered a credential")
 	}
 }
-
-// H3: config-managed Kiro/BT credentials must never be written back into the
-// auth store, including background status updates that do not carry an explicit
-// skip-persist context.
 func TestConfigManagedCredentialsSkipAuthStorePersistence(t *testing.T) {
 	store := &plusCredentialSpyStore{}
 	manager := coreauth.NewManager(store, nil, nil)
@@ -239,43 +246,48 @@ func TestKiroReconcileKeepsRotatedTokensAndAcceptsTokenFileChanges(t *testing.T)
 // immediately on every config reload.
 func TestBTLoginBackoffBoundsRepeatedFailures(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
-
-	var mu sync.Mutex
-	attempts := 0
+	attempts := make(chan int, 8)
+	var loginCount int
+	var countMu sync.Mutex
 	plusBTLogin = func(context.Context, string, string, string) (*btauth.BTTokenStorage, error) {
-		mu.Lock()
-		attempts++
-		mu.Unlock()
+		countMu.Lock()
+		loginCount++
+		current := loginCount
+		countMu.Unlock()
+		select {
+		case attempts <- current:
+		default:
+		}
 		return nil, errors.New("invalid credentials")
-	}
-	countAttempts := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return attempts
 	}
 
 	entry := config.BTKey{Phone: "13800000000", Password: "cGFzcw=="}
 	svc := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	svc.startPlusCredentialActivation(ctx, &config.Config{BTKey: []config.BTKey{entry}})
-	deadline := time.Now().Add(3 * time.Second)
-	for countAttempts() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-attempts:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial login was not attempted")
 	}
-	if countAttempts() != 1 {
-		t.Fatalf("login attempts = %d, want 1", countAttempts())
-	}
+	svc.plusCredentialWG.Wait()
 	if _, ok := svc.btLoginFailures[btConfigAuthID(entry)]; !ok {
 		t.Fatalf("failure was not recorded: %v", svc.btLoginFailures)
 	}
 
+	// A reload during the backoff window must skip the login entirely.
 	svc.startPlusCredentialActivation(ctx, &config.Config{BTKey: []config.BTKey{entry}})
-	time.Sleep(150 * time.Millisecond)
-	if got := countAttempts(); got != 1 {
-		t.Fatalf("login retried during backoff, attempts = %d", got)
+	svc.plusCredentialWG.Wait()
+	select {
+	case got := <-attempts:
+		t.Fatalf("login retried during backoff, attempt %d", got)
+	default:
 	}
 
 	// Once the delay elapses a reload may retry.
@@ -286,15 +298,13 @@ func TestBTLoginBackoffBoundsRepeatedFailures(t *testing.T) {
 	svc.btLoginFailures[id] = failure
 	svc.plusCredentialMu.Unlock()
 	svc.startPlusCredentialActivation(ctx, &config.Config{BTKey: []config.BTKey{entry}})
-	deadline = time.Now().Add(3 * time.Second)
-	for countAttempts() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if countAttempts() < 2 {
+	select {
+	case <-attempts:
+	case <-time.After(3 * time.Second):
 		t.Fatal("login was not retried after the backoff delay")
 	}
+	svc.plusCredentialWG.Wait()
 }
-
 func btConfigAuthID(entry config.BTKey) string {
 	id, _ := btConfigAuthIdentity(entry)
 	return id
@@ -316,7 +326,6 @@ func TestBTMaskPhoneKeepsOnlyLastDigits(t *testing.T) {
 // leave the manager serving a removed credential.
 func TestPlusCredentialRapidReloadStillDeletesSupersededCredential(t *testing.T) {
 	originalLogin := plusBTLogin
-	defer func() { plusBTLogin = originalLogin }()
 	plusBTLogin = func(ctx context.Context, phone, password, proxyURL string) (*btauth.BTTokenStorage, error) {
 		return &btauth.BTTokenStorage{UID: "uid-" + phone, AccessKey: "ak-" + phone, ServerID: "sid", Type: "bt"}, nil
 	}
@@ -329,16 +338,24 @@ func TestPlusCredentialRapidReloadStillDeletesSupersededCredential(t *testing.T)
 	idC, _ := btConfigAuthIdentity(entryC)
 
 	svc := &Service{cfg: &config.Config{BTKey: []config.BTKey{entryA}}, coreManager: coreauth.NewManager(nil, nil, nil)}
+	defer func() {
+		svc.stopPlusCredentialActivation()
+		plusCredentialUpdateHook = nil
+		plusBTLogin = originalLogin
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc.startPlusCredentialActivation(ctx, svc.cfg)
-	defer svc.stopPlusCredentialActivation()
-	if _, ok := svc.waitForRegisteredPlusAuth(ctx, idA, 3*time.Second); !ok {
+	svc.plusCredentialWG.Wait()
+	if _, ok := svc.coreManager.GetByID(idA); !ok {
 		t.Fatal("credential A was not registered")
 	}
 
 	parked := make(chan struct{})
 	release := make(chan struct{})
+	// Registered after the stop/join defer, so it runs first and never leaves the
+	// hooked worker parked when an assertion fails.
+	defer func() { closeOnce(release) }()
 	plusCredentialUpdateHook = func(update watcher.AuthUpdate) {
 		if update.ID != idA || update.Action != watcher.AuthUpdateActionDelete {
 			return
@@ -350,7 +367,6 @@ func TestPlusCredentialRapidReloadStillDeletesSupersededCredential(t *testing.T)
 		}
 		<-release
 	}
-	defer func() { plusCredentialUpdateHook = nil }()
 
 	doneB := make(chan struct{})
 	go func() {
@@ -368,25 +384,16 @@ func TestPlusCredentialRapidReloadStillDeletesSupersededCredential(t *testing.T)
 	svc.startPlusCredentialActivation(ctx, &config.Config{BTKey: []config.BTKey{entryC}})
 	close(release)
 	<-doneB
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, hasA := svc.coreManager.GetByID(idA)
-		_, hasB := svc.coreManager.GetByID(idB)
-		_, hasC := svc.coreManager.GetByID(idC)
-		if !hasA && !hasB && hasC {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("rapid reload left stale credentials: A=%v B=%v C=%v", hasA, hasB, hasC)
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The delete worker and every activation are part of the activator
+	// WaitGroup, so draining it makes the final credential set deterministic.
+	svc.plusCredentialWG.Wait()
+	_, hasA := svc.coreManager.GetByID(idA)
+	_, hasB := svc.coreManager.GetByID(idB)
+	_, hasC := svc.coreManager.GetByID(idC)
+	if hasA || hasB || !hasC {
+		t.Fatalf("rapid reload left stale credentials: A=%v B=%v C=%v", hasA, hasB, hasC)
 	}
 }
-
-// TestKiroTokenFileRemovalDeletesConfigCredential exercises the real fsnotify
-// path: deleting a token file must re-synthesize the config set and delete the
-// now-unbacked credential instead of serving its last loaded token forever.
 func TestKiroTokenFileRemovalDeletesConfigCredential(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "kiro-token.json")
@@ -415,15 +422,20 @@ func TestKiroTokenFileRemovalDeletesConfigCredential(t *testing.T) {
 		t.Fatalf("remove token file: %v", errRemove)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	// fsnotify delivery is genuinely asynchronous; a bounded ticker is the only
+	// time-based primitive used for this event wait.
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(5 * time.Second)
 	for {
-		if _, exists := svc.coreManager.GetByID(id); !exists {
-			return
-		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline:
 			t.Fatal("deleted token file left its config credential active")
+		case <-ticker.C:
+			if _, exists := svc.coreManager.GetByID(id); !exists {
+				return
+			}
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -448,15 +460,24 @@ func TestPlusCredentialDeleteHandoffJoinsStop(t *testing.T) {
 			close(started)
 		}
 	}
-	defer func() { plusCredentialUpdateHook = nil }()
+	// Join the tracked worker before clearing the seam, so the hook is never
+	// written while the worker can still read it.
+	defer func() {
+		svc.plusCredentialWG.Wait()
+		plusCredentialUpdateHook = nil
+	}()
 
 	// Hold the publication lock so the worker parks inside the handoff.
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(svc.plusCredentialPublishMu.Unlock) }
 	svc.plusCredentialPublishMu.Lock()
+	// Registered after the join defer, so it runs before it and releases the
+	// worker even when an earlier assertion fails.
+	defer unlock()
 	svc.enqueuePlusCredentialDelete(watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: id})
 	select {
 	case <-started:
 	case <-time.After(3 * time.Second):
-		svc.plusCredentialPublishMu.Unlock()
 		t.Fatal("delete worker did not reach the publication handoff")
 	}
 
@@ -465,15 +486,33 @@ func TestPlusCredentialDeleteHandoffJoinsStop(t *testing.T) {
 		svc.stopPlusCredentialActivation()
 		close(stopDone)
 	}()
-	time.Sleep(50 * time.Millisecond)
+
+	// Observe the fence under its mutex. The bounded ticker is only a scheduling
+	// primitive for reading the flag; the causal assertion is that stop cannot
+	// have returned while the worker is parked on the publication lock.
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	fenceDeadline := time.After(3 * time.Second)
+	for {
+		svc.plusCredentialMu.Lock()
+		fenced := svc.plusCredentialStopped
+		svc.plusCredentialMu.Unlock()
+		if fenced {
+			break
+		}
+		select {
+		case <-fenceDeadline:
+			t.Fatal("stop did not set the activation fence")
+		case <-ticker.C:
+		}
+	}
 	select {
 	case <-stopDone:
-		svc.plusCredentialPublishMu.Unlock()
 		t.Fatal("stop returned while the delete worker held the publication lock")
 	default:
 	}
 
-	svc.plusCredentialPublishMu.Unlock()
+	unlock()
 	select {
 	case <-stopDone:
 	case <-time.After(3 * time.Second):
@@ -483,10 +522,6 @@ func TestPlusCredentialDeleteHandoffJoinsStop(t *testing.T) {
 		t.Fatal("stale delete was applied after stop fenced the activator")
 	}
 }
-
-// TestPlusCredentialDeleteHandoffIsBoundedAndDeduped proves repeated churn for
-// the same credential cannot spawn one goroutine/publication per removal: the
-// single worker sees exactly one handoff while the delete is in flight.
 func TestPlusCredentialDeleteHandoffIsBoundedAndDeduped(t *testing.T) {
 	svc := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
 	id := "bt:config:churn"
@@ -505,7 +540,13 @@ func TestPlusCredentialDeleteHandoffIsBoundedAndDeduped(t *testing.T) {
 		}
 		<-release
 	}
-	defer func() { plusCredentialUpdateHook = nil }()
+	defer func() {
+		// Join the tracked worker before clearing the seam; the worker may still
+		// read the hook on a failure path.
+		closeOnce(release)
+		svc.plusCredentialWG.Wait()
+		plusCredentialUpdateHook = nil
+	}()
 
 	update := watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: id}
 	for i := 0; i < 20; i++ {
@@ -527,24 +568,31 @@ func TestPlusCredentialDeleteHandoffIsBoundedAndDeduped(t *testing.T) {
 	}
 	close(release)
 
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		svc.plusCredentialMu.Lock()
-		running := svc.plusCredentialDeleteWorker
-		queued := len(svc.plusCredentialDeleteQueue)
-		svc.plusCredentialMu.Unlock()
-		if !running && queued == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("delete worker did not drain")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The worker is tracked by plusCredentialWG; joining it is the deterministic
+	// drain signal instead of polling its state.
+	svc.plusCredentialWG.Wait()
+	svc.plusCredentialMu.Lock()
+	running := svc.plusCredentialDeleteWorker
+	queued := len(svc.plusCredentialDeleteQueue)
+	svc.plusCredentialMu.Unlock()
+	if running || queued != 0 {
+		t.Fatalf("delete worker state after join: running=%v queued=%d", running, queued)
 	}
 	hookMu.Lock()
 	finalCalls := hookCalls
 	hookMu.Unlock()
 	if finalCalls != 1 {
 		t.Fatalf("hook calls = %d, want 1", finalCalls)
+	}
+}
+
+// closeOnce unblocks a parked worker from cleanup paths without panicking when
+// the test body already closed the channel. Only the test goroutine calls it
+// (defers run after the body), so the receive/close pair is race free.
+func closeOnce(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
 	}
 }

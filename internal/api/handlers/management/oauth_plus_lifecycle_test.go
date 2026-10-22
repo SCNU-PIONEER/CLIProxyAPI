@@ -67,11 +67,10 @@ func TestPlusOAuthCommitFailureUnsticksSession(t *testing.T) {
 // TestPlusOAuthTerminalRetirementAndBudget covers the defect where finished
 // sessions were never retired, permanently consuming the concurrency budget.
 func TestPlusOAuthTerminalRetirementAndBudget(t *testing.T) {
-	oldAfterFunc := plusOAuthAfterFunc
 	var timerMu sync.Mutex
 	var retireFuncs []func()
 	var expireFuncs []func()
-	plusOAuthAfterFunc = func(delay time.Duration, callback func()) *time.Timer {
+	afterFunc := func(delay time.Duration, callback func()) *time.Timer {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		if delay == plusOAuthCompletedKeep {
@@ -81,9 +80,8 @@ func TestPlusOAuthTerminalRetirementAndBudget(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { plusOAuthAfterFunc = oldAfterFunc }()
 
-	store := newPlusOAuthSessionStore()
+	store := newPlusOAuthSessionStoreWithAfterFunc(afterFunc)
 	states := make([]string, 0, 20)
 	for index := 0; index < 10; index++ {
 		session, errCreate := store.createSession("qoder", context.Background())
@@ -193,10 +191,9 @@ func TestPlusOAuthErrorsDoNotLeakSecrets(t *testing.T) {
 // TestPlusOAuthFixedTTLNotExtended covers the defect where the session expiry
 // deadline was updated but neither the timer nor the deadline was enforced.
 func TestPlusOAuthFixedTTLNotExtended(t *testing.T) {
-	oldAfterFunc := plusOAuthAfterFunc
 	var timerMu sync.Mutex
 	expireCount := 0
-	plusOAuthAfterFunc = func(delay time.Duration, callback func()) *time.Timer {
+	afterFunc := func(delay time.Duration, callback func()) *time.Timer {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		if delay != plusOAuthCompletedKeep {
@@ -204,9 +201,8 @@ func TestPlusOAuthFixedTTLNotExtended(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { plusOAuthAfterFunc = oldAfterFunc }()
 
-	store := newPlusOAuthSessionStore()
+	store := newPlusOAuthSessionStoreWithAfterFunc(afterFunc)
 	session, errCreate := store.createSession("kilo", context.Background())
 	if errCreate != nil {
 		t.Fatalf("create session: %v", errCreate)
@@ -376,10 +372,9 @@ func (w *lockedLogBuffer) String() string {
 // TestPlusOAuthRetirementAfterCloseIsHarmless proves retention timers that
 // fire after the coordinator closed only no-op.
 func TestPlusOAuthRetirementAfterCloseIsHarmless(t *testing.T) {
-	oldAfterFunc := plusOAuthAfterFunc
 	var timerMu sync.Mutex
 	var retireFuncs []func()
-	plusOAuthAfterFunc = func(delay time.Duration, callback func()) *time.Timer {
+	afterFunc := func(delay time.Duration, callback func()) *time.Timer {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		if delay == plusOAuthCompletedKeep {
@@ -387,9 +382,8 @@ func TestPlusOAuthRetirementAfterCloseIsHarmless(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { plusOAuthAfterFunc = oldAfterFunc }()
 
-	store := newPlusOAuthSessionStore()
+	store := newPlusOAuthSessionStoreWithAfterFunc(afterFunc)
 	session, errCreate := store.createSession("qoder", context.Background())
 	if errCreate != nil {
 		t.Fatalf("create session: %v", errCreate)

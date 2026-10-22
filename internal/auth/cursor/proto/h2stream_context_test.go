@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,7 +16,9 @@ func TestDialH2StreamContextCancelsDuringDial(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	dialStarted := make(chan struct{})
 	dial := func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		close(dialStarted)
 		<-dialCtx.Done()
 		return nil, dialCtx.Err()
 	}
@@ -26,7 +29,11 @@ func TestDialH2StreamContextCancelsDuringDial(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-dialStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dial never started")
+	}
 	cancel()
 
 	select {
@@ -45,6 +52,8 @@ func TestDialH2StreamContextCancelsHandshake(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
 
+	handshakeStarted := make(chan struct{})
+	clientConn = &signalingConn{Conn: clientConn, started: handshakeStarted}
 	dial := func(context.Context, string, string) (net.Conn, error) {
 		return clientConn, nil
 	}
@@ -58,7 +67,11 @@ func TestDialH2StreamContextCancelsHandshake(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-handshakeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("TLS handshake never started I/O")
+	}
 	cancel()
 
 	select {
@@ -88,4 +101,23 @@ func TestDialH2StreamContextWithDialerPropagatesDialErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("DialH2StreamContextWithDialer error = %v, want dial failure", err)
 	}
+}
+
+// signalingConn reports the first handshake I/O attempt without sleeps.
+type signalingConn struct {
+	net.Conn
+	started chan struct{}
+	once    sync.Once
+}
+
+func (c *signalingConn) signal() { c.once.Do(func() { close(c.started) }) }
+
+func (c *signalingConn) Read(p []byte) (int, error) {
+	c.signal()
+	return c.Conn.Read(p)
+}
+
+func (c *signalingConn) Write(p []byte) (int, error) {
+	c.signal()
+	return c.Conn.Write(p)
 }

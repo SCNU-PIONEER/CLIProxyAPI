@@ -77,7 +77,15 @@ func TestH2StreamWriteResumesWhenWindowOpens(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Write([]byte("hello")) }()
 
-	time.Sleep(50 * time.Millisecond)
+	// Window credit is published under windowMu before the broadcast, so a
+	// writer that has not reached Wait yet observes the credit on its next
+	// loop check; a writer already in Wait is woken by the broadcast. No
+	// sleep is needed to avoid a lost wakeup, and this guards early success.
+	select {
+	case err := <-done:
+		t.Fatalf("Write returned before flow-control credit was granted: %v", err)
+	default:
+	}
 	s.windowMu.Lock()
 	s.sendWindow, s.connWindow = 100, 100
 	s.windowMu.Unlock()

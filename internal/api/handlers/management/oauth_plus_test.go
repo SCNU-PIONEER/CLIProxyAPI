@@ -87,19 +87,24 @@ func startPlusSessionRequestWithQuery(t *testing.T, h *Handler, target string) m
 
 func waitPlusStatus(t *testing.T, store *plusOAuthSessionStore, state string, match func(map[string]any) bool) map[string]any {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if payload, ok := store.status(state); ok {
-			view := map[string]any(payload)
-			if match(view) {
-				return view
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			payload, _ := store.status(state)
+			t.Fatalf("status did not reach expectation, last=%v", payload)
+		case <-ticker.C:
+			if payload, ok := store.status(state); ok {
+				view := map[string]any(payload)
+				if match(view) {
+					return view
+				}
 			}
 		}
-		time.Sleep(2 * time.Millisecond)
 	}
-	payload, _ := store.status(state)
-	t.Fatalf("status did not reach expectation, last=%v", payload)
-	return nil
 }
 
 func TestPlusOAuthProviderCatalogNormalizesEndpoints(t *testing.T) {

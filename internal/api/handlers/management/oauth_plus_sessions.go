@@ -48,10 +48,6 @@ var (
 	errPlusOAuthClosed          = errors.New("oauth coordinator is closed")
 )
 
-// plusOAuthAfterFunc schedules expiry and retention timers. Tests replace it
-// with a deterministic scheduler so no test depends on wall-clock sleeps.
-var plusOAuthAfterFunc = time.AfterFunc
-
 // plusOAuthSession is one management-driven Plus provider login. All mutable
 // state is guarded by mu; the login context is never held under the global
 // session store lock.
@@ -268,10 +264,22 @@ type plusOAuthSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*plusOAuthSession
 	closed   bool
+	// afterFunc schedules expiry and retention timers. It is fixed at
+	// construction so async completion paths never read mutable test seams.
+	afterFunc func(time.Duration, func()) *time.Timer
 }
 
 func newPlusOAuthSessionStore() *plusOAuthSessionStore {
-	return &plusOAuthSessionStore{sessions: make(map[string]*plusOAuthSession)}
+	return newPlusOAuthSessionStoreWithAfterFunc(time.AfterFunc)
+}
+
+// newPlusOAuthSessionStoreWithAfterFunc builds a store with a deterministic
+// timer implementation for tests; production stores use time.AfterFunc.
+func newPlusOAuthSessionStoreWithAfterFunc(afterFunc func(time.Duration, func()) *time.Timer) *plusOAuthSessionStore {
+	if afterFunc == nil {
+		afterFunc = time.AfterFunc
+	}
+	return &plusOAuthSessionStore{sessions: make(map[string]*plusOAuthSession), afterFunc: afterFunc}
 }
 
 func (st *plusOAuthSessionStore) createSession(provider string, baseCtx context.Context) (*plusOAuthSession, error) {
@@ -300,7 +308,7 @@ func (st *plusOAuthSessionStore) createSession(provider string, baseCtx context.
 		status:   plusOAuthStatusPending,
 	}
 	session.retire = func() { st.scheduleRetirement(state) }
-	session.expireTimer = plusOAuthAfterFunc(plusOAuthSessionTTL, func() { st.expire(state) })
+	session.expireTimer = st.afterFunc(plusOAuthSessionTTL, func() { st.expire(state) })
 	st.sessions[state] = session
 	st.mu.Unlock()
 	return session, nil
@@ -398,7 +406,7 @@ func (st *plusOAuthSessionStore) scheduleRetirement(state string) {
 		return
 	}
 	session.retireTimerSet = true
-	plusOAuthAfterFunc(plusOAuthCompletedKeep, func() { st.remove(state) })
+	st.afterFunc(plusOAuthCompletedKeep, func() { st.remove(state) })
 }
 
 func (st *plusOAuthSessionStore) expire(state string) {
