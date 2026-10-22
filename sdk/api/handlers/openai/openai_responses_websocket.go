@@ -35,6 +35,7 @@ const (
 	wsTurnStateHeader                     = "x-codex-turn-state"
 	wsTimelineBodyKey                     = "WEBSOCKET_TIMELINE_OVERRIDE"
 	wsCloseReasonMaxBytes                 = 123
+	wsCloseFallbackWriteTimeout           = 250 * time.Millisecond
 	wsHTTPReplayRequiredCloseReason       = "upstream requires HTTP replay"
 	responsesWebsocketUpstreamModeUnknown = ""
 	responsesWebsocketUpstreamModeWS      = "websocket"
@@ -115,8 +116,11 @@ func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter
 }
 
 // closeForUpstreamError sends a best-effort close frame without waiting behind
-// an active downstream data writer. If a data write already owns writeMu, the
-// connection is closed immediately so the blocked writer and session can exit.
+// an active downstream data writer. The frame is the only signal telling the
+// client to replay the turn over HTTP, so a busy writer must not downgrade the
+// session to an abnormal closure (1006): gorilla already serializes control
+// frames with in-flight writes, and a bounded write still reaches the client
+// once a short write drains without letting a wedged write hold the session.
 func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -129,7 +133,10 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 		return true, nil
 	}
 	if !w.writeMu.TryLock() {
-		return true, w.conn.Close()
+		deadline := time.Now().Add(wsCloseFallbackWriteTimeout)
+		errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, deadline)
+		_ = w.conn.Close()
+		return true, errWrite
 	}
 	defer w.writeMu.Unlock()
 
