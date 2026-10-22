@@ -1,11 +1,14 @@
 package home
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -84,12 +87,16 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 		t.Run(blockedOperation, func(t *testing.T) {
 			blocked := make(chan struct{})
 			release := make(chan struct{})
+			heartbeats := newBlockedRPCTestHeartbeats()
 			var blockOnce sync.Once
 			block := func() {
+				// The target RPC has entered the fixture: stop and join the simulated heartbeats
+				// before signalling the test so that no frame can be written after the silence
+				// starts. The subscriber's own 200ms window is left untouched.
+				heartbeats.Stop()
 				blockOnce.Do(func() { close(blocked) })
 				<-release
 			}
-			t.Cleanup(func() { close(release) })
 			target, _ := newRedisCommandTestClient(t, func(args []string) string {
 				if blockedOperation == "PING" && strings.EqualFold(args[0], "PING") {
 					block()
@@ -102,7 +109,7 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}
-			client, commands := newRedisCommandTestClient(t, func(args []string) string {
+			client, commands := newBlockedRPCTestClient(t, heartbeats, func(args []string) string {
 				switch strings.ToUpper(args[0]) {
 				case "CLUSTER":
 					if args[1] == "BALANCE" {
@@ -124,6 +131,7 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 					return balanceTestRedisReply(args)
 				}
 			})
+			t.Cleanup(func() { close(release) })
 			enableBalanceTestClient(client)
 			client.balance.registered = false
 			client.testOperationTimeout = 5 * time.Second
@@ -174,6 +182,150 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 				t.Fatalf("migration cancellation interrupted the source command pool: %v", errPing)
 			}
 		})
+	}
+}
+
+// blockedRPCTestHeartbeatInterval and blockedRPCTestHeartbeatFrame simulate the periodic Home
+// heartbeats that refresh the subscriber's read deadline. The channel is unknown to the client,
+// so a heartbeat is consumed without touching the lifecycle config.
+const (
+	blockedRPCTestHeartbeatInterval = 25 * time.Millisecond
+	blockedRPCTestHeartbeatFrame    = "*3\r\n$7\r\nmessage\r\n$14\r\nhome-heartbeat\r\n$1\r\n1\r\n"
+)
+
+// blockedRPCTestHeartbeats owns the simulated heartbeat producers of one fixture connection
+// set. Stop closes the silence window and joins every producer, so after it returns no frame can
+// be written any more.
+type blockedRPCTestHeartbeats struct {
+	mu      sync.Mutex
+	silence chan struct{}
+	stopped bool
+	wg      sync.WaitGroup
+}
+
+func newBlockedRPCTestHeartbeats() *blockedRPCTestHeartbeats {
+	return &blockedRPCTestHeartbeats{silence: make(chan struct{})}
+}
+
+// Stop ends the silence window and waits for all producers to exit. It is safe to call more than
+// once and also safe when no producer ever started (for example when a command is blocked before
+// the subscription is established).
+func (h *blockedRPCTestHeartbeats) Stop() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if !h.stopped {
+		h.stopped = true
+		close(h.silence)
+	}
+	h.mu.Unlock()
+	h.wg.Wait()
+}
+
+// Start launches a producer that pushes heartbeat frames on conn until Stop is called or the
+// connection fails.
+func (h *blockedRPCTestHeartbeats) Start(conn net.Conn, writeMu *sync.Mutex) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
+		return
+	}
+	h.wg.Add(1)
+	h.mu.Unlock()
+	go func() {
+		defer h.wg.Done()
+		ticker := time.NewTicker(blockedRPCTestHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-h.silence:
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				_, errWrite := io.WriteString(conn, blockedRPCTestHeartbeatFrame)
+				writeMu.Unlock()
+				if errWrite != nil {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// newBlockedRPCTestClient mirrors newRedisCommandTestClient and additionally keeps the
+// subscriber's heartbeat window alive with simulated Home pushes. The subscriber therefore stays
+// alive while it is still dispatching setup work, and a test starts the silence window exactly
+// when it blocks an RPC instead of racing that window against an unbounded scheduling delay.
+func newBlockedRPCTestClient(t *testing.T, heartbeats *blockedRPCTestHeartbeats, handler func([]string) string) (*Client, *redisCommandLog) {
+	t.Helper()
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	commands := &redisCommandLog{}
+	var connections sync.WaitGroup
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			connections.Add(1)
+			go func(conn net.Conn) {
+				defer connections.Done()
+				defer func() { _ = conn.Close() }()
+				serveBlockedRPCTestConn(conn, commands, handler, heartbeats)
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-serverDone
+		// Blocked RPCs are released by a cleanup registered after this fixture, so handlers can
+		// exit and be joined. Heartbeats stop first so their producers cannot outlive the conns.
+		heartbeats.Stop()
+		connections.Wait()
+	})
+	addr, okAddr := listener.Addr().(*net.TCPAddr)
+	if !okAddr {
+		t.Fatalf("unexpected listener address %v", listener.Addr())
+	}
+	client := New(config.HomeConfig{
+		Enabled: true, Host: addr.IP.String(), Port: addr.Port, DisableClusterDiscovery: true,
+	})
+	client.testOperationTimeout = homeRedisTestOperationTimeout
+	t.Cleanup(func() { client.Close() })
+	return client, commands
+}
+
+func serveBlockedRPCTestConn(conn net.Conn, commands *redisCommandLog, handler func([]string) string, heartbeats *blockedRPCTestHeartbeats) {
+	reader := bufio.NewReader(conn)
+	var writeMu sync.Mutex
+	for {
+		args, errRead := readRedisCommand(reader)
+		if errRead != nil {
+			return
+		}
+		commands.Append(args)
+		reply := "+OK\r\n"
+		if handler != nil {
+			reply = handler(args)
+		}
+		writeMu.Lock()
+		_, errWrite := io.WriteString(conn, reply)
+		writeMu.Unlock()
+		if errWrite != nil {
+			return
+		}
+		if strings.EqualFold(args[0], "SUBSCRIBE") {
+			heartbeats.Start(conn, &writeMu)
+		}
 	}
 }
 

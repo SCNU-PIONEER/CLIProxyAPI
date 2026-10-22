@@ -3,9 +3,9 @@
 package watcher
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"reflect"
 	"time"
 
@@ -17,6 +17,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// loadConfigFileFunc loads and parses the configuration file. It is a variable
+// so tests can observe the reload path, including a write landing between the
+// change-check read and this load (which only costs one extra reload).
 var loadConfigFileFunc = config.LoadConfig
 
 func (w *Watcher) stopConfigReloadTimer() {
@@ -56,13 +59,16 @@ func (w *Watcher) reloadConfigIfChanged() {
 	w.configApplyMu.Lock()
 	defer w.configApplyMu.Unlock()
 
-	data, err := os.ReadFile(w.configPath)
+	// The change-check read stays coordinated with in-process writers; the
+	// loader performs its own coordinated read, so a write landing between the
+	// two is applied by the next reload instead of being lost.
+	data, err := config.ReadConfigFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
 		return
 	}
-	if len(data) == 0 {
-		log.Debugf("ignoring empty config file write event")
+	if len(bytes.TrimSpace(data)) == 0 {
+		log.Debugf("ignoring empty or whitespace-only config file write event")
 		return
 	}
 	sum := sha256.Sum256(data)
@@ -78,9 +84,9 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
-		// Record the bytes the reload actually parsed, not the change-check read or a
-		// later re-read: a write landing between them must not count as applied. A
-		// write-back during load only costs one extra reload.
+		// Record the bytes the reload actually parsed, not the change-check read
+		// or a later re-read: a write landing between them must not count as
+		// applied. A write-back during load only costs one extra reload.
 		w.clientsMutex.Lock()
 		appliedHash := newHash
 		if w.config != nil && w.config.SourceHash != "" {
@@ -92,6 +98,9 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 }
 
+// reloadConfig reloads from the config file, reading at load time. Keeping the
+// load read separate from the change-check read is intentional: a write landing
+// between them is applied now and only costs one extra reload.
 func (w *Watcher) reloadConfig() bool {
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)

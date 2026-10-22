@@ -56,6 +56,12 @@ jobs:
       - name: Race-check late interrupt lifecycle
         if: ${{ !cancelled() }}
         run: go test -race ./sdk/api/handlers/openai -run '^TestResponses(LocalInterrupt.*|HTTPTerminalInterruptsUseCurrentTurn|LateInterruptDoesNotPoisonNextCreate|InterruptStopsHTTPUpstream)$' -count=20
+      - name: Race-check coordinated configuration file access
+        if: ${{ !cancelled() }}
+        run: go test -race ./internal/config ./internal/watcher ./internal/store -run 'ConfigFileAccess|PrepareConfigFile|ReloadConfig|PersistConfig|Seed' -count=3
+      - name: Race-check concurrent management configuration reload
+        if: ${{ !cancelled() }}
+        run: go test -race ./sdk/cliproxy -run '^TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559$' -count=20
       - name: Build
         if: ${{ !cancelled() }}
         run: go build -o "${RUNNER_TEMP}/cli-proxy-api" ./cmd/server

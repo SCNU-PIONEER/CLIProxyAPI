@@ -37,7 +37,7 @@ the operator supplies a management key and API calls use the protected
 `/v8/management` endpoints. Do not expose the management API without transport
 security and access controls. As with existing CPA API-key configuration, a
 management key grants access to configuration secrets: BT passwords and Kiro
-client secrets are visible in authenticated configuration exports. Base64 is not
+access/refresh tokens are visible in authenticated configuration exports. Base64 is not
 redaction or encryption; grant management access only to trusted operators.
 
 Plus login flows use `/oauth/auth-url`, `/oauth/status`, and `/oauth/session` under
@@ -50,10 +50,12 @@ successful cancellation. GitLab PAT import uses `/oauth/import?provider=gitlab`;
 only HTTPS GitLab base URLs and same-origin redirects are accepted, including
 legitimate private self-hosted installations.
 
-Usage aggregation is available under `/observability/usage`, `/export`, and
-`/import`, with the existing authenticated management boundary. It follows the
-usage-statistics configuration toggle and is disabled in Home mode. The existing
-v8 usage queue and API-key usage endpoints remain available. Kiro quota is fetched
+Usage aggregation is available at `/observability/usage`, with export and import
+at `/observability/usage/export` and `/observability/usage/import`, under the v8
+management prefix and authenticated management boundary. The usage-statistics
+toggle controls recording, not endpoint availability. Home mode disables the
+management endpoints. The existing v8 usage queue and API-key usage routes are
+preserved. Kiro quota is fetched
 on demand through `/observability/quota/kiro?auth_index=...`; it uses caller
 cancellation and the canonical credential refresh manager rather than launching
 an unbounded background quota poller.
@@ -93,6 +95,13 @@ count endpoint are estimates, not billing guarantees. Unit/contract tests cover
 registration, configuration, payload order, callback validation, and cancellation.
 Live provider login and inference require actual accounts and are not established
 by mocked tests or a successful build.
+
+Configuration file coordination prevents participating in-process readers from
+observing a management write's truncate/write window while preserving the mounted
+file's inode, symlink behavior and permissions. It does not make writes by external
+editors or Git repository synchronization/staging atomic, and it is not a crash-safe
+filesystem transaction. Object-store and PostgreSQL configuration persistence use
+the coordinated reader; the inherited Git-store synchronization design is unchanged.
 
 The frontend was upgraded from Next.js 16.2.4 to 16.4.2. The unused shadcn CLI
 package was removed while its MIT-licensed stylesheet was preserved locally.

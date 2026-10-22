@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -15,28 +14,48 @@ import (
 // Existing v8 documents are saved in the latest layout. Successful migration
 // also synchronizes cfg's OAuth scope for runtime snapshots.
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
-	persistCfg := cfg
-	migrating := len(migrateV8) > 0 && migrateV8[0]
-	// Load original YAML as a node tree to preserve comments and ordering.
-	data, err := os.ReadFile(configFile)
+	requestedMigration := len(migrateV8) > 0 && migrateV8[0]
+	var migrated *Config
+	err := UpdateConfigFile(configFile, func(data []byte) ([]byte, error) {
+		out, migratedCfg, errBuild := buildConfigPreserveComments(data, cfg, requestedMigration)
+		if errBuild != nil {
+			return nil, errBuild
+		}
+		migrated = migratedCfg
+		return out, nil
+	})
 	if err != nil {
 		return err
 	}
+	if migrated != nil {
+		// Keep runtime-only values intact and publish scope only after the write succeeds.
+		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
+	}
+	return nil
+}
+
+// buildConfigPreserveComments renders the merged config document from data.
+// It returns the bytes to persist and, when a v8 migration ran, the decoded
+// migrated config whose runtime-only scope must be published after the write.
+func buildConfigPreserveComments(data []byte, cfg *Config, migrateV8 bool) ([]byte, *Config, error) {
+	persistCfg := cfg
+	migrating := migrateV8
+	var err error
 
 	var original yaml.Node
 	if err = yaml.Unmarshal(data, &original); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if original.Kind != yaml.DocumentNode || len(original.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
+		return nil, nil, fmt.Errorf("invalid yaml document structure")
 	}
 	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected root mapping node")
+		return nil, nil, fmt.Errorf("expected root mapping node")
 	}
 	layout := deepCopyNode(original.Content[0])
 	flat, err := flattenV8(layout)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	original.Content[0] = flat
 	layout = expandConfigAliases(layout)
@@ -45,17 +64,17 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
 	rendered, err := yaml.Marshal((*legacyConfig)(persistCfg))
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	var generated yaml.Node
 	if err = yaml.Unmarshal(rendered, &generated); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if generated.Kind != yaml.DocumentNode || len(generated.Content) == 0 || generated.Content[0] == nil {
-		return fmt.Errorf("invalid generated yaml structure")
+		return nil, nil, fmt.Errorf("invalid generated yaml structure")
 	}
 	if generated.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected generated root mapping node")
+		return nil, nil, fmt.Errorf("expected generated root mapping node")
 	}
 
 	// Keep obsolete roots until v8 migration can preserve them as comments.
@@ -75,7 +94,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if !migrating {
 		// Keep historical client fields at their original legacy paths. Otherwise
@@ -97,45 +116,32 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	enc.SetIndent(2)
 	if err = enc.Encode(&original); err != nil {
 		_ = enc.Close()
-		return err
+		return nil, nil, err
 	}
 	if err = enc.Close(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
 	var migrated *Config
 	if migrating {
 		data, _, err = NormalizeConfigLayout(data, true)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		migrated = new(Config)
 		if err = yaml.Unmarshal(data, migrated); err != nil {
-			return fmt.Errorf("decode migrated config: %w", err)
+			return nil, nil, fmt.Errorf("decode migrated config: %w", err)
 		}
 	}
-	if err = os.WriteFile(configFile, data, 0600); err != nil {
-		return err
-	}
-	if migrated != nil {
-		// Keep runtime-only values intact and publish scope only after the write succeeds.
-		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
-	}
-	return nil
+	return data, migrated, nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return err
-	}
-	data, err = updateNestedScalarYAML(data, path, value)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configFile, data, 0600)
+	return UpdateConfigFile(configFile, func(data []byte) ([]byte, error) {
+		return updateNestedScalarYAML(data, path, value)
+	})
 }
 
 // updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
