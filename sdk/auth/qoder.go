@@ -262,7 +262,20 @@ func startQoderCallbackServer(port int, callbackState, expectedNonce string) (*h
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	port = listener.Addr().(*net.TCPAddr).Port
+	return serveQoderCallbackServer(listener, callbackState, expectedNonce)
+}
+
+// serveQoderCallbackServer serves one login callback on an already-bound
+// loopback listener. Tests bind an ephemeral listener so parallel packages never
+// contend for the production default port; production callers go through
+// startQoderCallbackServer, which keeps the configured default and loopback
+// binding behavior.
+func serveQoderCallbackServer(listener net.Listener, callbackState, expectedNonce string) (*http.Server, int, <-chan qoderCallbackResult, error) {
+	port, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return nil, 0, nil, fmt.Errorf("qoder callback listener is not TCP: %T", listener.Addr())
+	}
 	resultCh := make(chan qoderCallbackResult, 1)
 
 	mux := http.NewServeMux()
@@ -295,7 +308,7 @@ func startQoderCallbackServer(port int, callbackState, expectedNonce string) (*h
 		}
 	}()
 
-	return srv, port, resultCh, nil
+	return srv, port.Port, resultCh, nil
 }
 
 // parseQoderCallbackURL accepts a qoder:// callback URL (or a bare query

@@ -3,12 +3,30 @@ package auth
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+// startQoderTestCallbackServer binds an OS-assigned loopback port so parallel
+// test processes never contend for the production default callback port.
+func startQoderTestCallbackServer(t *testing.T, callbackState, expectedNonce string) (*http.Server, int, <-chan qoderCallbackResult) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind ephemeral callback listener: %v", err)
+	}
+	srv, port, resultCh, errServer := serveQoderCallbackServer(listener, callbackState, expectedNonce)
+	if errServer != nil {
+		_ = listener.Close()
+		t.Fatalf("serveQoderCallbackServer: %v", errServer)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	return srv, port, resultCh
+}
 
 // qoderCallbackURL builds the encoded forward URL the VBS handler would send.
 func qoderCallbackURL(token string) string {
@@ -19,11 +37,7 @@ func qoderCallbackURL(token string) string {
 // serves the per-login path: a local page that does not know the random state
 // cannot push a token into the pending login.
 func TestQoderCallbackServerRejectsUnknownState(t *testing.T) {
-	srv, port, resultCh, err := startQoderCallbackServer(0, "known-state", "expected-nonce")
-	if err != nil {
-		t.Fatalf("startQoderCallbackServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
+	_, port, resultCh := startQoderTestCallbackServer(t, "known-state", "expected-nonce")
 
 	raw := qoderCallbackURL("injected-token")
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/forward?url=%s", port, url.QueryEscape(raw)))
@@ -46,11 +60,7 @@ func TestQoderCallbackServerRejectsUnknownState(t *testing.T) {
 // TestQoderCallbackServerAcceptsBoundState ensures the expected per-login path
 // still delivers the token.
 func TestQoderCallbackServerAcceptsBoundState(t *testing.T) {
-	srv, port, resultCh, err := startQoderCallbackServer(0, "known-state", "expected-nonce")
-	if err != nil {
-		t.Fatalf("startQoderCallbackServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
+	_, port, resultCh := startQoderTestCallbackServer(t, "known-state", "expected-nonce")
 
 	raw := qoderCallbackURL("callback-token")
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/forward/known-state?url=%s", port, url.QueryEscape(raw)))
@@ -76,11 +86,7 @@ func TestQoderCallbackServerAcceptsBoundState(t *testing.T) {
 // TestQoderCallbackServerDoesNotBlockOnDuplicateCallbacks ensures a second
 // callback cannot wedge the handler goroutine.
 func TestQoderCallbackServerDoesNotBlockOnDuplicateCallbacks(t *testing.T) {
-	srv, port, _, err := startQoderCallbackServer(0, "known-state", "expected-nonce")
-	if err != nil {
-		t.Fatalf("startQoderCallbackServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
+	_, port, _ := startQoderTestCallbackServer(t, "known-state", "expected-nonce")
 
 	raw := qoderCallbackURL("callback-token")
 	for i := 0; i < 2; i++ {

@@ -2667,13 +2667,19 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return nil
 		})
 
-		// Start server reader loop so server processes control frames.
+		payloadReceived := make(chan struct{})
+		var payloadSeen atomic.Bool
+		// Start server reader loop so server processes control frames and records
+		// that the client request payload has fully arrived before replying.
 		readErrCh := make(chan error, 1)
 		go func() {
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					readErrCh <- errRead
 					return
+				}
+				if payloadSeen.CompareAndSwap(false, true) {
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2698,6 +2704,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		// The client was parked inside its payload write while the ping/pong
+		// exchange ran; wait for that write to reach the server before the
+		// terminal response so the fake upstream never closes first.
+		select {
+		case <-payloadReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for the client payload to arrive before the terminal response")
 			return
 		}
 
@@ -2766,10 +2782,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
+		var payloadSeen atomic.Bool
+		// The reader records that the client request payload has fully arrived;
+		// the reply must not race the paused upload.
 		go func() {
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if payloadSeen.CompareAndSwap(false, true) {
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2794,6 +2817,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		// The client was parked inside its payload write while the ping/pong
+		// exchange ran; wait for that write to reach the server before the
+		// terminal response so the fake upstream never closes first.
+		select {
+		case <-payloadReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for the client payload to arrive before the terminal response")
 			return
 		}
 
@@ -2858,10 +2891,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
+		var payloadSeen atomic.Bool
+		// The reader records that the client request payload has fully arrived;
+		// the reply must not race the paused upload.
 		go func() {
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if payloadSeen.CompareAndSwap(false, true) {
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2886,6 +2926,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
+			return
+		}
+
+		// The client was parked inside its payload write while the ping/pong
+		// exchange ran; wait for that write to reach the server before the
+		// terminal response so the fake upstream never closes first.
+		select {
+		case <-payloadReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for the client payload to arrive before the terminal response")
 			return
 		}
 
