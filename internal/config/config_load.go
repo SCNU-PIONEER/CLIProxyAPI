@@ -41,19 +41,18 @@ func ComputeSourceHash(data []byte) string {
 // copies stay identical. When the plaintext cannot be removed it returns an error and
 // leaves configFile untouched, so every later attempt refuses the file again.
 func PrepareConfigFileForUpload(configFile string) error {
-	data, errRead := os.ReadFile(configFile)
-	if errRead != nil {
-		return errRead
-	}
-	prepared, errPrepare := prepareConfigForUpload(data)
-	if errPrepare != nil {
-		return errPrepare
-	}
-	if bytes.Equal(prepared, data) {
-		return nil
-	}
-	if errWrite := os.WriteFile(configFile, prepared, 0600); errWrite != nil {
-		return fmt.Errorf("failed to write prepared config file: %w", errWrite)
+	errUpdate := UpdateConfigFile(configFile, func(data []byte) ([]byte, error) {
+		prepared, errPrepare := prepareConfigForUpload(data)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
+		if bytes.Equal(prepared, data) {
+			return data, nil
+		}
+		return prepared, nil
+	})
+	if errUpdate != nil {
+		return fmt.Errorf("failed to write prepared config file: %w", errUpdate)
 	}
 	return nil
 }
@@ -155,8 +154,10 @@ func managementSecretKeyPath(data []byte) []string {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	// Read the entire configuration file into memory.
-	data, err := os.ReadFile(configFile)
+	// Read the entire configuration file into memory. The shared lock keeps a
+	// reload from observing a truncate window from an in-process management
+	// save; the lock is released before parsing below.
+	data, err := ReadConfigFile(configFile)
 	if err != nil {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
@@ -169,6 +170,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return loadConfigOptionalBytes(data, optional, configFile)
+}
+
+// loadConfigOptionalBytes is the shared parse/normalize/validate core for
+// LoadConfigOptional and ParseConfigBytes. A non-empty configFile enables the
+// file-migration pass; byte-only callers pass an empty path.
+func loadConfigOptionalBytes(data []byte, optional bool, configFile string) (*Config, error) {
+	var err error
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
@@ -242,16 +251,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
+	var managementPlaintext, managementHashed string
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		managementPlaintext = cfg.RemoteManagement.SecretKey
 		hashed, errHash := hashSecret(cfg.RemoteManagement.SecretKey)
 		if errHash != nil {
 			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
 		}
 		cfg.RemoteManagement.SecretKey = hashed
-
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		managementHashed = hashed
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
@@ -324,6 +332,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeKiroKeys()
+	cfg.SanitizeBTKeys()
 
 	// Normalize global OAuth model settings.
 	cfg.SanitizeOAuthSettings()
@@ -334,19 +344,62 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-	// Only conflicting legacy fields are removed on load. A legacy-only document
-	// stays legacy until a v8 configuration write explicitly migrates it.
-	current, errRead := os.ReadFile(configFile)
-	if errRead != nil {
-		return nil, errRead
-	}
-	cleaned, changed, errLayout := NormalizeConfigLayout(current, false)
-	if errLayout != nil {
-		return nil, errLayout
-	}
-	if changed {
-		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
-			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
+	// Persist loader-derived on-disk state: a plaintext management secret is
+	// replaced by its bcrypt hash and conflicting legacy fields are removed.
+	// The update closure runs against the bytes read under the file lock, so a
+	// concurrent in-process save is merged rather than overwritten by the
+	// pre-lock snapshot this config was parsed from.
+	if configFile != "" {
+		legacyCleanupPending := false
+		errPersist := UpdateConfigFile(configFile, func(current []byte) ([]byte, error) {
+			updated := current
+			secretPath := managementSecretKeyPath(updated)
+			if secret, ok := nestedScalarValue(updated, strings.Join(secretPath, ".")); ok && secret != "" && !looksLikeBcrypt(secret) {
+				// Reuse the hash the runtime config already holds when the file
+				// still carries the same plaintext; hashing again would produce a
+				// different bcrypt salt and leave the applied config and disk
+				// disagreeing. A newer plaintext on disk is hashed as-is and is
+				// never overwritten by the pre-lock snapshot hash.
+				hashed := managementHashed
+				if secret != managementPlaintext || hashed == "" {
+					var errHash error
+					hashed, errHash = hashSecret(secret)
+					if errHash != nil {
+						return nil, &configLoadPersistError{err: fmt.Errorf("failed to hash remote management key: %w", errHash)}
+					}
+				}
+				next, errSet := updateNestedScalarYAML(updated, secretPath, hashed)
+				if errSet != nil {
+					return nil, &configLoadPersistError{err: fmt.Errorf("failed to persist hashed remote management key: %w", errSet)}
+				}
+				updated = next
+			}
+			// Only conflicting legacy fields are removed on load. A legacy-only
+			// document stays legacy until a v8 configuration write migrates it.
+			cleaned, changed, errLayout := NormalizeConfigLayout(updated, false)
+			if errLayout != nil {
+				return nil, &configLoadPersistError{err: errLayout}
+			}
+			if changed {
+				updated = cleaned
+				legacyCleanupPending = true
+			}
+			return updated, nil
+		})
+		var fatal *configLoadPersistError
+		if errors.As(errPersist, &fatal) {
+			return nil, fatal.err
+		}
+		if errPersist != nil {
+			if legacyCleanupPending {
+				// Removing conflicting legacy fields is part of the applied config,
+				// so a failed cleanup write must abort instead of leaving the file
+				// and the runtime shape disagreeing.
+				return nil, fmt.Errorf("clean conflicting config fields: %w", errPersist)
+			}
+			// Persisting the hashed secret was best-effort before this change:
+			// a read-only file still loads and re-hashes on the next start.
+			log.Warnf("failed to persist hashed remote management key: %v", errPersist)
 		}
 	}
 
@@ -356,4 +409,28 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// configLoadPersistError marks a failure computing the loader migration, as
+// opposed to a failure writing the migrated bytes.
+type configLoadPersistError struct{ err error }
+
+func (e *configLoadPersistError) Error() string { return e.err.Error() }
+func (e *configLoadPersistError) Unwrap() error { return e.err }
+
+// nestedScalarValue returns the scalar at dottedPath (e.g.
+// "management.secret-key") after expanding YAML aliases.
+func nestedScalarValue(data []byte, dottedPath string) (string, bool) {
+	var root yaml.Node
+	if errUnmarshal := yaml.Unmarshal(data, &root); errUnmarshal != nil {
+		return "", false
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 || root.Content[0] == nil {
+		return "", false
+	}
+	node := yamlPath(expandConfigAliases(root.Content[0]), dottedPath)
+	if node == nil || node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" {
+		return "", false
+	}
+	return node.Value, true
 }

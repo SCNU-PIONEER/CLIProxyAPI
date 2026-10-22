@@ -178,6 +178,13 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// Plus provider credentials and request identity settings.
+	KiroKey               []KiroKey              `yaml:"kiro" json:"kiro"`
+	BTKey                 []BTKey                `yaml:"bt" json:"bt"`
+	KiroFingerprint       *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
+	KiroPreferredEndpoint string                 `yaml:"kiro-preferred-endpoint" json:"kiro-preferred-endpoint"`
+	IncognitoBrowser      bool                   `yaml:"incognito-browser" json:"incognito-browser"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 

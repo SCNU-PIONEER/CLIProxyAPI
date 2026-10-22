@@ -187,10 +187,11 @@ func TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret(t *testing.T)
 }
 
 // seedTestDatabase is a database/sql driver whose config table is empty; it records
-// every config upsert.
+// every config upsert and config record deletion.
 type seedTestDatabase struct {
 	mu      sync.Mutex
 	upserts []string
+	deletes int
 }
 
 type seedTestConn struct {
@@ -209,6 +210,12 @@ func (d *seedTestDatabase) recordedUpserts() []string {
 	return append([]string(nil), d.upserts...)
 }
 
+func (d *seedTestDatabase) recordedDeletes() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.deletes
+}
+
 func (*seedTestConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("prepare is not supported")
 }
@@ -222,16 +229,28 @@ func (*seedTestConn) Begin() (driver.Tx, error) {
 }
 
 func (c *seedTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if !strings.Contains(query, "INSERT INTO") || len(args) != 2 {
+	switch {
+	case strings.Contains(query, "INSERT INTO"):
+		if len(args) != 2 {
+			return nil, fmt.Errorf("unexpected statement %q", query)
+		}
+		content, ok := args[1].Value.(string)
+		if !ok {
+			return nil, errors.New("config content is not a string")
+		}
+		c.database.mu.Lock()
+		c.database.upserts = append(c.database.upserts, content)
+		c.database.mu.Unlock()
+	case strings.Contains(query, "DELETE FROM"):
+		if len(args) != 1 {
+			return nil, fmt.Errorf("unexpected statement %q", query)
+		}
+		c.database.mu.Lock()
+		c.database.deletes++
+		c.database.mu.Unlock()
+	default:
 		return nil, fmt.Errorf("unexpected statement %q", query)
 	}
-	content, ok := args[1].Value.(string)
-	if !ok {
-		return nil, errors.New("config content is not a string")
-	}
-	c.database.mu.Lock()
-	c.database.upserts = append(c.database.upserts, content)
-	c.database.mu.Unlock()
 	return driver.RowsAffected(1), nil
 }
 

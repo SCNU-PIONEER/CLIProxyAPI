@@ -325,9 +325,42 @@ func resolveReleaseURL(repo string) string {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
-			parsed.Path = parsed.Path + "/releases/latest"
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) < 3 ||
+			!strings.EqualFold(parts[0], "repos") ||
+			parts[1] == "" ||
+			parts[2] == "" {
+			return defaultManagementReleaseURL
 		}
+
+		repoPath := fmt.Sprintf("/repos/%s/%s", parts[1], parts[2])
+		if len(parts) == 4 && strings.EqualFold(parts[3], "releases") {
+			parsed.Path = repoPath + "/releases/latest"
+			return parsed.String()
+		}
+		if len(parts) == 5 && strings.EqualFold(parts[3], "releases") {
+			isReleaseID := parts[4] != ""
+			for _, char := range parts[4] {
+				if char < '0' || char > '9' {
+					isReleaseID = false
+					break
+				}
+			}
+			if strings.EqualFold(parts[4], "latest") || isReleaseID {
+				return parsed.String()
+			}
+
+			parsed.Path = repoPath + "/releases/latest"
+			return parsed.String()
+		}
+		if len(parts) == 6 &&
+			strings.EqualFold(parts[3], "releases") &&
+			strings.EqualFold(parts[4], "tags") &&
+			parts[5] != "" {
+			return parsed.String()
+		}
+
+		parsed.Path = repoPath + "/releases/latest"
 		return parsed.String()
 	}
 

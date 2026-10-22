@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
@@ -42,6 +43,57 @@ func (c *Client) canExecuteRebalanceLocked() bool {
 		recoveryState(c.recoveryState.Load()) == recoveryStateStable && !c.balance.moving
 }
 
+// rebalanceTransportTracker records raw connections opened for a rebalance RPC
+// so cancellation can close them directly. Closing the redis client is not
+// sufficient: on Unix its pool health check peeks busy connections with a raw
+// socket read and blocks behind the in-flight command, so the connection is
+// never closed and the RPC cannot observe cancellation.
+type rebalanceTransportTracker struct {
+	dialer func(context.Context, string, string) (net.Conn, error)
+
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
+}
+
+func newRebalanceTransportTracker(dialer func(context.Context, string, string) (net.Conn, error)) *rebalanceTransportTracker {
+	return &rebalanceTransportTracker{dialer: dialer}
+}
+
+// Dial records the connection before handing it to go-redis, so a cancel that
+// races with dial completion still closes the late connection.
+func (t *rebalanceTransportTracker) Dial(ctx context.Context, network string, address string) (net.Conn, error) {
+	conn, errDial := t.dialer(ctx, network, address)
+	if errDial != nil {
+		return nil, errDial
+	}
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+	}
+	t.conns[conn] = struct{}{}
+	t.mu.Unlock()
+	return conn, nil
+}
+
+// close stops tracking and closes every recorded connection. The map is
+// detached under the lock but the blocking Close calls run without it.
+func (t *rebalanceTransportTracker) close() {
+	t.mu.Lock()
+	t.closed = true
+	conns := t.conns
+	t.conns = nil
+	t.mu.Unlock()
+	for conn := range conns {
+		_ = conn.Close()
+	}
+}
+
 // rebalanceCommand owns a cancellable transport independent of issued dispatches.
 func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...any) (string, error) {
 	if errContext := ctx.Err(); errContext != nil {
@@ -58,11 +110,13 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	}
 	options.ReadTimeout = -1
 	options.WriteTimeout = -1
-	options.Dialer = redis.NewDialer(options)
+	tracker := newRebalanceTransportTracker(redis.NewDialer(options))
+	options.Dialer = tracker.Dial
 	command := redis.NewClient(options)
-	stopCancel := context.AfterFunc(ctx, func() { _ = command.Close() })
+	stopCancel := context.AfterFunc(ctx, tracker.close)
 	defer func() {
 		stopCancel()
+		tracker.close()
 		if errClose := command.Close(); errClose != nil && ctx.Err() == nil {
 			log.Debugf("Home rebalance transport close failed: %v", errClose)
 		}

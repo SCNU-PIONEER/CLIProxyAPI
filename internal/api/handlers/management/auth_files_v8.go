@@ -29,6 +29,9 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	case "meta":
 		h.RequestMetaToken(c)
 	default:
+		if h.StartPlusOAuthV8(c) {
+			return
+		}
 		if !h.ServePluginAuthURL(c) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "provider_not_found"})
 		}
@@ -40,6 +43,8 @@ func (h *Handler) ImportOAuthV8(c *gin.Context) {
 	switch strings.ToLower(strings.TrimSpace(c.Query("provider"))) {
 	case "":
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
+	case "gitlab":
+		h.RequestGitLabPATToken(c)
 	case "vertex":
 		h.ImportVertexCredential(c)
 	default:

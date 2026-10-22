@@ -17,20 +17,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// newDefaultAuthManager creates a default authentication manager with supported OAuth providers.
+// newDefaultAuthManager creates a default authentication manager with supported
+// OAuth providers. The provider list lives in sdk/auth.NewDefaultManager so the
+// service, CLI, and management API cannot drift apart.
 func newDefaultAuthManager() *sdkAuth.Manager {
-	return sdkAuth.NewManager(
-		sdkAuth.GetTokenStore(),
-		sdkAuth.NewCodexAuthenticator(),
-		sdkAuth.NewClaudeAuthenticator(),
-		sdkAuth.NewAntigravityAuthenticator(),
-		sdkAuth.NewKimiAuthenticator(),
-		sdkAuth.NewKimiAIAuthenticator(),
-		sdkAuth.NewKimiAIDotAuthenticator(),
-		sdkAuth.NewXAIAuthenticator(),
-		sdkAuth.NewDevinAuthenticator(),
-		sdkAuth.NewMetaAuthenticator(),
-	)
+	return sdkAuth.NewDefaultManager(sdkAuth.GetTokenStore())
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -122,6 +113,9 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	startedRegs := make([]authRegistrationWait, 0)
 	startedWaitByID := make(map[string]authRegistrationWait)
 	for _, update := range updates {
+		if s.dropSupersededPlusCredentialUpdate(update) {
+			continue
+		}
 		id := authUpdateID(update)
 		if id == "" {
 			filtered = append(filtered, update)

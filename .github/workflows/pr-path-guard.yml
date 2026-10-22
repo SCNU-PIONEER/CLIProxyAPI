@@ -7,6 +7,10 @@ on:
       - synchronize
       - reopened
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   ensure-no-translator-changes:
     runs-on: ubuntu-latest
@@ -14,6 +18,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Resolve maintainer permission
+        id: maintainer
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const trusted = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            if (trusted.has(pr.author_association)) return true;
+            // Event snapshots can report NONE for private organization members.
+            // Resolve the PR author's actual access, never the triggering actor's.
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                ...context.repo,
+                username: pr.user.login,
+              });
+              core.info(`PR author repository permission: ${data.permission}`);
+              return ['admin', 'maintain', 'write'].includes(data.permission);
+            } catch (error) {
+              core.warning(`Unable to verify maintainer access (HTTP ${error.status ?? 'unknown'}); retaining restriction.`);
+              return false;
+            }
       - name: Detect internal/translator changes
         id: changed-files
         uses: tj-actions/changed-files@v45
@@ -21,8 +46,8 @@ jobs:
           files: |
             internal/translator/**
       - name: Fail when restricted paths change
-        if: steps.changed-files.outputs.any_changed == 'true'
+        if: steps.changed-files.outputs.any_changed == 'true' && steps.maintainer.outputs.result != 'true'
         run: |
-          echo "Changes under internal/translator are not allowed in pull requests."
-          echo "You need to create an issue for our maintenance team to make the necessary changes."
+          echo "Changes under internal/translator require repository maintainer access."
+          echo "External contributors should open an issue for the maintenance team."
           exit 1

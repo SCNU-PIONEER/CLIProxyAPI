@@ -28,6 +28,10 @@ type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
 
+type KiroKey = internalconfig.KiroKey
+type BTKey = internalconfig.BTKey
+type KiroFingerprintConfig = internalconfig.KiroFingerprintConfig
+
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
 type XAIKey = internalconfig.XAIKey

@@ -45,6 +45,28 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// plusCredentialMu guards the config-driven Plus credential activator' state.
+	plusCredentialMu         sync.Mutex
+	plusCredentialGeneration uint64
+	plusCredentialCancel     context.CancelFunc
+	plusCredentialWG         sync.WaitGroup
+	plusCredentialIDs        map[string]struct{}
+	plusCredentialStopped    bool
+	btLoginFailures          map[string]btLoginFailure
+
+	// plusCredentialPublishMu serializes activation publications (adds and the
+	// stale-entry deletes) with generation fencing so a stale add can never be
+	// published after the delete that superseded it.
+	plusCredentialPublishMu sync.Mutex
+
+	// plusCredentialDeletePending deduplicates queued stale deletes by auth ID;
+	// plusCredentialDeleteQueue is drained by one tracked worker goroutine
+	// (plusCredentialDeleteWorker reports whether it is running). All fields are
+	// guarded by plusCredentialMu.
+	plusCredentialDeletePending map[string]struct{}
+	plusCredentialDeleteQueue   []watcher.AuthUpdate
+	plusCredentialDeleteWorker  bool
+
 	// configPath is the path to the configuration file.
 	configPath string
 

@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -38,6 +39,9 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
+	sdkAuthManager          *sdkAuth.Manager
+	usageStats              *usage.RequestStatistics
+	plusOAuthSessions       *plusOAuthSessionStore
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
@@ -81,9 +85,12 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		tokenStore:          sdkAuth.GetTokenStore(),
+		usageStats:          usage.GetRequestStatistics(),
+		plusOAuthSessions:   newPlusOAuthSessionStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.SetSDKAuthManager(sdkAuth.NewDefaultManager(h.tokenStore))
 	h.startAttemptCleanup()
 	return h
 }
@@ -147,7 +154,7 @@ func (h *Handler) isStaleConfigFileSnapshotLocked(cfg *config.Config) bool {
 	if cfg == nil || cfg.SourceHash == "" || h.configFilePath == "" {
 		return false
 	}
-	data, errRead := os.ReadFile(h.configFilePath)
+	data, errRead := config.ReadConfigFile(h.configFilePath)
 	if errRead != nil {
 		return false
 	}
@@ -487,3 +494,16 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persistLocked(c)
 }
+
+// SetSDKAuthManager sets the SDK auth manager for OAuth provider operations.
+func (h *Handler) SetSDKAuthManager(manager *sdkAuth.Manager) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sdkAuthManager = manager
+}
+
+// SetUsageStats sets the usage statistics tracker for the management handler.
+func (h *Handler) SetUsageStats(stats *usage.RequestStatistics) { h.usageStats = stats }

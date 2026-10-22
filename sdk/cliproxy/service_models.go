@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -211,6 +212,23 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "gitlab":
+		models = applyExcludedModels(executor.GitLabModelsFromAuth(a), excluded)
+	case "kiro":
+		models = applyExcludedModels(s.fetchKiroModels(ctx, cfg, a), excluded)
+	case "bt":
+		models = registry.GetStaticModelDefinitionsByChannel(provider)
+		if entry := resolveConfigBTKeyForConfig(cfg, a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildBTConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "kilo", "cursor", "github-copilot", "codebuddy", "codebuddy-ai", "codearts", "joycode", "qoder", "iflow":
+		models = applyExcludedModels(registry.GetStaticModelDefinitionsByChannel(provider), excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg != nil {
@@ -1100,6 +1118,35 @@ func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "meta", "meta", "meta")
+}
+
+func resolveConfigBTKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *config.BTKey {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, cfg.BTKey); entry != nil {
+		return entry
+	}
+	phone := ""
+	if auth.Attributes != nil {
+		phone = strings.TrimSpace(auth.Attributes["bt_phone"])
+	}
+	if phone == "" {
+		return nil
+	}
+	for i := range cfg.BTKey {
+		if strings.EqualFold(strings.TrimSpace(cfg.BTKey[i].Phone), phone) {
+			return &cfg.BTKey[i]
+		}
+	}
+	return nil
+}
+
+func buildBTConfigModels(entry *config.BTKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "bt", "bt", "bt")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

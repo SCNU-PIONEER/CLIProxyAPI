@@ -440,7 +440,10 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.configPath)
+	// Read through the config package's coordinated reader: a concurrent
+	// management save truncates the file in place, so an uncoordinated read can
+	// capture an empty or partial document and persist it as the remote config.
+	data, err := config.ReadConfigFile(s.configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteConfigRecord(ctx)
@@ -477,7 +480,7 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 		if errPrepare := config.PrepareConfigFileForUpload(s.configPath); errPrepare != nil {
 			return fmt.Errorf("postgres store: prepare local config for seeding: %w", errPrepare)
 		}
-		data, errRead := os.ReadFile(s.configPath)
+		data, errRead := config.ReadConfigFile(s.configPath)
 		if errRead != nil {
 			return fmt.Errorf("postgres store: read local config: %w", errRead)
 		}

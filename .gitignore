@@ -22,6 +22,8 @@ objectstore/*
 
 # Static assets
 static/*
+internal/managementasset/web_static/*
+!internal/managementasset/web_static/README.md
 
 # Authentication data
 auths/*
@@ -67,3 +69,4 @@ docker-compose.override.yml
 
 # Local LLM Wiki vault
 .llm-wiki
+.porting/

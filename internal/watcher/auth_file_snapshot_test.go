@@ -12,7 +12,9 @@ import (
 )
 
 func TestSnapshotAuthFileRelativeAuthDir(t *testing.T) {
-	// Keep the fixture on the working directory's volume without changing cwd.
+	// Exercise relative paths without requiring write access to the source tree.
+	// Chdir also keeps the fixture and working directory on the same volume.
+	t.Chdir(t.TempDir())
 	authDir, errMkdirTemp := os.MkdirTemp(".", "snapshot-relative-authdir-")
 	if errMkdirTemp != nil {
 		t.Fatal(errMkdirTemp)

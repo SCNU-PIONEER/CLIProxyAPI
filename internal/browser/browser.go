@@ -21,6 +21,9 @@ import (
 // Returns:
 //   - An error if the URL cannot be opened, otherwise nil.
 func OpenURL(url string) error {
+	if IsIncognitoMode() {
+		return openPrivateURL(url)
+	}
 	fmt.Printf("Attempting to open URL in browser: %s\n", url)
 
 	// Try using the open-golang library first

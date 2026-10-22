@@ -243,6 +243,7 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.syncPluginModelRuntime(registrationCtx)
+	s.startPlusCredentialActivation(ctx, cfg)
 	return ctx.Err() == nil
 }
 
