@@ -30,6 +30,9 @@ describes the updater CLI and the operating contract.
   plugins; the portable `_no-plugin` build is intentionally not deployable.
 - systemd, with the existing service (default `cliproxyapi.service`) already
   running the binary at `/root/cliproxyapi/cli-proxy-api`.
+- The unit must set `WorkingDirectory` to the app directory (default
+  `/root/cliproxyapi`). Deployment refuses a missing or different value, because
+  relative `--config` and auth paths would resolve elsewhere.
 - Root access for installation and deployment.
 - Python 3.8+ with the standard library. No pip packages are required.
 - `git` for the one-time checkout. The updater itself uses HTTPS only.
@@ -424,6 +427,7 @@ Notes:
 | Exit 5, journal present | Inspect `journal.json` and the service. If the phase is `failed` or `rollback_failed`, the updater refuses to continue and `--retry` does not bypass it; recover manually, then use `--abort-journal`. Other phases are recovered on the next run |
 | Exit 5, live binary drift | The binary was replaced outside this tool. Reconcile it deliberately; a recorded baseline is not silently overwritten |
 | `ExecStart` mismatch | Fix the unit manually or pass the correct `--binary`; the installer never edits `cliproxyapi.service` |
+| `WorkingDirectory` missing or mismatched | Set `WorkingDirectory` to the app directory in the unit, run `systemctl daemon-reload`, and rerun `--check`; the installer never edits `cliproxyapi.service` |
 | Health check fails after restart | The updater restores the binary automatically. Check `deploy.log`, `journalctl -u cliproxyapi`, and restore the config snapshot manually if needed |
 | Timer does not run | `systemctl status cpap-deploy.timer`; re-run `install.sh --enable` |
 | Disk full during download | Free space in `/root/cliproxyapi.deploy`; the updater does not touch the live binary until verification completes |

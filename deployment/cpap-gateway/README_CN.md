@@ -24,6 +24,7 @@
 - Linux `x86_64`（amd64）或 `aarch64`（arm64）。
 - glibc 2.17 或更新版本。默认发布构建是 CGO/glibc，支持插件；可移植的 `_no-plugin` 构建不在部署范围内。
 - systemd，并且现有服务（默认 `cliproxyapi.service`）已经运行 `/root/cliproxyapi/cli-proxy-api`。
+- 单元必须把 `WorkingDirectory` 设为应用目录（默认 `/root/cliproxyapi`）。缺失或指向别处时更新器会拒绝部署，因为相对 `--config` 和认证路径会解析到不同位置。
 - 安装和部署需要 root。
 - Python 3.8+，仅使用标准库，不需要 pip 安装依赖。
 - 一次性检出需要 `git`；更新器运行时只需要 HTTPS。
@@ -318,6 +319,7 @@ git push origin v8.0.39
 | 退出码 5，存在 journal | 检查 `journal.json` 和服务。若 phase 为 `failed` 或 `rollback_failed`，更新器会拒绝继续，`--retry` 也不能绕过；人工恢复服务后再用 `--abort-journal`。其他 phase 会在下一次运行时自动恢复 |
 | 退出码 5，二进制漂移 | 二进制被本工具之外的操作替换。需要有意识地核对；已记录的 baseline 不会被静默覆盖 |
 | `ExecStart` 不匹配 | 手工修复单元，或传入正确的 `--binary`；安装脚本不会修改 `cliproxyapi.service` |
+| `WorkingDirectory` 缺失或不匹配 | 在单元中把 `WorkingDirectory` 设为应用目录，执行 `systemctl daemon-reload`，再运行 `--check`；安装脚本不会修改 `cliproxyapi.service` |
 | 重启后健康检查失败 | 更新器会自动恢复二进制。检查 `deploy.log`、`journalctl -u cliproxyapi`；必要时按上文手工恢复配置快照 |
 | 定时器没有运行 | `systemctl status cpap-deploy.timer`；重新执行 `install.sh --enable` |
 | 下载时磁盘满 | 清理 `/root/cliproxyapi.deploy`；校验完成前更新器不会触碰运行中的二进制 |
