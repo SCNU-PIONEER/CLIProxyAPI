@@ -58,6 +58,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// Kiro config credentials
+	out = append(out, s.synthesizeKiroKeys(ctx)...)
 
 	return out, nil
 }

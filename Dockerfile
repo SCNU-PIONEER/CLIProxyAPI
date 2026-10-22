@@ -1,3 +1,10 @@
+FROM node:24-bookworm-slim AS web-builder
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM golang:1.26-bookworm AS builder
 
 WORKDIR /app
@@ -9,6 +16,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=web-builder /web/out/ ./internal/managementasset/web_static/
 
 ARG VERSION=dev
 ARG COMMIT=none

@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -116,6 +117,26 @@ func main() {
 	var xaiLogin bool
 	var devinLogin bool
 	var metaLogin bool
+	var codeartsLogin bool
+	var codebuddyLogin bool
+	var codebuddyAILogin bool
+	var cursorLogin bool
+	var githubCopilotLogin bool
+	var gitlabLogin bool
+	var gitlabTokenLogin bool
+	var iflowLogin bool
+	var iflowCookie bool
+	var joycodeLogin bool
+	var kiloLogin bool
+	var kiroAWSLogin bool
+	var kiroImport bool
+	var kiroAuthCodeLogin bool
+	var kiroIDCLogin bool
+	var kiroIDCStartURL string
+	var kiroIDCRegion string
+	var kiroIDCFlow string
+	var qoderLogin bool
+	var btLogin bool
 	var discoverGateways bool
 	var discoverTimeout int
 	var discoverJSON bool
@@ -146,6 +167,26 @@ func main() {
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
+	flag.BoolVar(&codeartsLogin, "codearts-login", false, "Login to CodeArts using OAuth")
+	flag.BoolVar(&codebuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using OAuth")
+	flag.BoolVar(&codebuddyAILogin, "codebuddy-ai-login", false, "Login to CodeBuddy AI using OAuth")
+	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using OAuth")
+	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using OAuth")
+	flag.BoolVar(&gitlabLogin, "gitlab-login", false, "Login to GitLab Duo using OAuth")
+	flag.BoolVar(&gitlabTokenLogin, "gitlab-token-login", false, "Login to GitLab Duo using a personal access token")
+	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
+	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Authenticate iFlow with a browser cookie")
+	flag.BoolVar(&joycodeLogin, "joycode-login", false, "Login to JoyCode using OAuth")
+	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo using device code flow")
+	flag.BoolVar(&kiroAWSLogin, "kiro-aws-login", false, "Login to Kiro with AWS Builder ID")
+	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro credentials from the Kiro IDE")
+	flag.BoolVar(&kiroAuthCodeLogin, "kiro-authcode-login", false, "Login to Kiro with AWS Builder ID using the authorization code flow")
+	flag.BoolVar(&kiroIDCLogin, "kiro-idc-login", false, "Login to Kiro with an AWS IAM Identity Center start URL")
+	flag.StringVar(&kiroIDCStartURL, "kiro-idc-start-url", "", "AWS IAM Identity Center start URL (use with -kiro-idc-login)")
+	flag.StringVar(&kiroIDCRegion, "kiro-idc-region", "", "AWS region for IAM Identity Center (use with -kiro-idc-login)")
+	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC login flow: device or authcode (use with -kiro-idc-login)")
+	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using OAuth")
+	flag.BoolVar(&btLogin, "bt-login", false, "Authenticate the BT accounts configured under bt")
 	flag.BoolVar(&discoverGateways, "discover", false, "Discover local AI gateways and CPA instances on the LAN")
 	flag.IntVar(&discoverTimeout, "discover-timeout", 3, "Timeout in seconds for LAN discovery (default 3s)")
 	flag.BoolVar(&discoverJSON, "discover-json", false, "Output discovered gateways in JSON format")
@@ -658,7 +699,15 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	// Honor the configured private-window preference for any CLI login flow
+	// that opens a browser. HTTP-driven flows opt out of browser launches.
+	if cfg != nil {
+		browser.SetIncognitoMode(cfg.IncognitoBrowser)
+	}
+
+	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin ||
+		codeartsLogin || codebuddyLogin || codebuddyAILogin || cursorLogin || githubCopilotLogin || gitlabLogin || gitlabTokenLogin ||
+		iflowLogin || iflowCookie || joycodeLogin || kiloLogin || kiroAWSLogin || kiroImport || kiroAuthCodeLogin || kiroIDCLogin || qoderLogin || btLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -741,6 +790,40 @@ func main() {
 		cmd.DoDevinLogin(cfg, options)
 	} else if metaLogin {
 		cmd.DoMetaLogin(cfg, options)
+	} else if codeartsLogin {
+		cmd.DoCodeArtsLogin(cfg, options)
+	} else if codebuddyLogin {
+		cmd.DoCodeBuddyLogin(cfg, options)
+	} else if codebuddyAILogin {
+		cmd.DoCodeBuddyAILogin(cfg, options)
+	} else if cursorLogin {
+		cmd.DoCursorLogin(cfg, options)
+	} else if githubCopilotLogin {
+		cmd.DoGitHubCopilotLogin(cfg, options)
+	} else if gitlabLogin {
+		cmd.DoGitLabLogin(cfg, options)
+	} else if gitlabTokenLogin {
+		cmd.DoGitLabTokenLogin(cfg, options)
+	} else if iflowLogin {
+		cmd.DoIFlowLogin(cfg, options)
+	} else if iflowCookie {
+		cmd.DoIFlowCookieAuth(cfg, options)
+	} else if joycodeLogin {
+		cmd.DoJoyCodeLogin(cfg, options)
+	} else if kiloLogin {
+		cmd.DoKiloLogin(cfg, options)
+	} else if kiroAWSLogin {
+		cmd.DoKiroAWSLogin(cfg, options)
+	} else if kiroImport {
+		cmd.DoKiroImport(cfg, options)
+	} else if kiroAuthCodeLogin {
+		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
+	} else if kiroIDCLogin {
+		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
+	} else if qoderLogin {
+		cmd.DoQoderLogin(cfg, options)
+	} else if btLogin {
+		cmd.DoBTLogin(cfg)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

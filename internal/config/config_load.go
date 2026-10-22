@@ -324,6 +324,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeKiroKeys()
+	cfg.SanitizeBTKeys()
 
 	// Normalize global OAuth model settings.
 	cfg.SanitizeOAuthSettings()

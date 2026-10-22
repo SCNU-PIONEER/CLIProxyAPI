@@ -113,6 +113,27 @@ access:
 # Optional credential concurrency and observation contracts.
 
 # credentials:
+#   # Plus Kiro credentials: inline fields override the optional token file.
+#   # Keep credential files private. A refresh token enables scheduled renewal.
+#   kiro:
+#     - token-file: "~/.aws/sso/cache/kiro-auth-token.json"
+#       region: "us-east-1"
+#       agent-task-type: "vibe" # vibe, dev, or chat
+#       preferred-endpoint: "cli"
+#       # access-token: "..."
+#       # refresh-token: "..."
+#       # profile-arn: "..."
+#       # proxy-url: "http://127.0.0.1:7890"
+#   # BT activation runs asynchronously; passwords are never copied to auth JSON.
+#   # Base64 is encoding, not encryption. Protect this configuration as a secret.
+#   bt:
+#     - phone: "your-phone"
+#       password: "base64-encoded-password"
+#       prefix: "bt"
+#       priority: 0
+#       # models:
+#       #   - name: "provider-model"
+#       #     alias: "client-model"
 #
 #   # Credential concurrency is configured by Home in Home mode. The synthesized Home config is
 #   # authoritative and local values, including the values below, are ignored. Do not use local
@@ -1067,6 +1088,11 @@ oauth:
   # Provider options below apply to OAuth/file-backed credentials.
   # API-key credentials use their own group/key options.
   providers:
+    # Optional Plus Kiro defaults (per-credential settings take precedence).
+    # kiro:
+    #   preferred-endpoint: "cli"
+    #   fingerprint:
+    #     kiro-version: "your-client-version"
     aistudio:
       # When true, enable authentication for the WebSocket API (/v1/ws).
       ws-auth: true

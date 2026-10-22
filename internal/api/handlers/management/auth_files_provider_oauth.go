@@ -945,6 +945,17 @@ func (h *Handler) CancelAuthSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
+	store := h.plusOAuthStore()
+	if _, okPlus := store.get(state); okPlus {
+		cancelled, committing, _ := store.cancel(state)
+		if committing {
+			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth session is committing credentials", "cancelled": false})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": cancelled})
+		return
+	}
+
 	cancelled := CancelOAuthSession(state)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": cancelled})
 }
@@ -957,6 +968,11 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
+		return
+	}
+
+	if payload, okPlus := h.plusOAuthStore().status(state); okPlus {
+		c.JSON(http.StatusOK, payload)
 		return
 	}
 

@@ -18,7 +18,25 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend
+        working-directory: web
+        run: npm ci
+      - name: Test frontend API contracts
+        working-directory: web
+        run: npm test
+      - name: Lint frontend
+        working-directory: web
+        run: npm run lint
+      - name: Export and embed Plus dashboard
+        working-directory: web
+        run: npm run build:embed
       - name: Test
+        if: ${{ !cancelled() }}
         run: go test ./...
       - name: Race-check Home reconnect regression
         if: ${{ !cancelled() }}
@@ -26,6 +44,9 @@ jobs:
       - name: Race-check Home blocked RPC cancellation
         if: ${{ !cancelled() }}
         run: go test -race ./internal/home -run '^Test(ClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry|RebalanceTransportTracker.*|RebalanceCommandCancelAbortsBlockedTransport)$' -count=3
+      - name: Race-check Plus credentials and OAuth
+        if: ${{ !cancelled() }}
+        run: go test -race ./sdk/cliproxy ./sdk/cliproxy/auth ./sdk/auth ./internal/runtime/executor ./internal/auth/cursor/proto ./internal/api/handlers/management ./internal/watcher/synthesizer -run 'Plus|Kiro|BT|H2Stream|LoginChallenge|GitLab|Qoder|CodeArts|JoyCode|Cursor' -count=1
       - name: Build
         if: ${{ !cancelled() }}
         run: go build -o "${RUNNER_TEMP}/cli-proxy-api" ./cmd/server

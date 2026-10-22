@@ -5,6 +5,8 @@ package util
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -27,4 +29,28 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 		httpClient.Transport = transport
 	}
 	return httpClient
+}
+
+// NewHTTPClientWithProxy builds a client for a single credential operation.
+// A non-empty proxyOverride (for example an auth-specific ProxyURL) takes
+// precedence over cfg.ProxyURL so per-auth proxy settings apply to token
+// refresh and credential acquisition instead of only to request execution.
+func NewHTTPClientWithProxy(cfg *config.SDKConfig, proxyOverride string, timeout time.Duration) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	proxyURL := strings.TrimSpace(proxyOverride)
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL == "" {
+		return client
+	}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	if errBuild != nil {
+		log.Errorf("%v", errBuild)
+		return client
+	}
+	if transport != nil {
+		client.Transport = transport
+	}
+	return client
 }
