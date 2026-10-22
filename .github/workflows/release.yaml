@@ -51,17 +51,27 @@ jobs:
           previous_tag=""
           if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
-            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
-          else
-            changelog_range="$GITHUB_REF_NAME"
           fi
 
-          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
-            grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
+          if [[ -n "$previous_tag" ]]; then
+            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
+            git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
+              grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
+          else
+            # First release in this repository: the complete history exceeds the
+            # GitHub release body limit, so summarize the most recent commits.
+            git log --reverse -n 40 --pretty=format:'- %s (%h)' "$GITHUB_REF_NAME" |
+              grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
+          fi
 
-          gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" \
-            --jq .body > "$generated_notes_file"
+          if [[ -n "$previous_tag" ]]; then
+            gh api "repos/${GH_REPO}/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" \
+              -f previous_tag_name="$previous_tag" \
+              --jq .body > "$generated_notes_file"
+          else
+            printf 'Initial release of %s.\n' "$GITHUB_REF_NAME" > "$generated_notes_file"
+          fi
           if [[ ! -s "$generated_notes_file" ]]; then
             if [[ -n "$previous_tag" ]]; then
               printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
@@ -84,6 +94,22 @@ jobs:
             printf '\n'
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
+
+          # GitHub rejects release bodies above 125000 characters. Truncate on a
+          # UTF-8 boundary with headroom so the release is still created.
+          python3 - "$updated_notes_file" <<'PY'
+          import sys
+
+          limit = 120000
+          suffix = "\n\n_Release notes were truncated to fit the GitHub release body limit._\n"
+          target = sys.argv[1]
+          with open(target, "rb") as handle:
+              body = handle.read().decode("utf-8", "replace")
+          if len(body) > limit:
+              body = body[: limit - len(suffix)].rstrip() + suffix
+              with open(target, "w", encoding="utf-8", newline="\n") as handle:
+                  handle.write(body)
+          PY
 
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
