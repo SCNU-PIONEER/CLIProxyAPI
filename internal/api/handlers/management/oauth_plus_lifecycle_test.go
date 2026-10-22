@@ -231,7 +231,11 @@ func TestPlusOAuthLoginMetadataWhitelist(t *testing.T) {
 			return newFakePlusAuth("gitlab-meta.json"), nil
 		},
 	})
-	recorder, _ := startPlusOAuthRawRequest(t, h, "/v8/management/oauth/auth-url?provider=gitlab&base_url=https%3A%2F%2Fgitlab.example.com&client_id=client-abc&login_mode=pat&personal_access_token=secret-marker-token&oauth_client_secret=secret-marker-secret")
+	recorder, start := startPlusOAuthRawRequest(t, h, "/v8/management/oauth/auth-url?provider=gitlab&base_url=https%3A%2F%2Fgitlab.example.com&client_id=client-abc&login_mode=pat&personal_access_token=secret-marker-token&oauth_client_secret=secret-marker-secret")
+	state, _ := start["state"].(string)
+	if state == "" {
+		t.Fatalf("start response missing state: %v", start)
+	}
 
 	var opts *sdkAuth.LoginOptions
 	select {
@@ -256,6 +260,11 @@ func TestPlusOAuthLoginMetadataWhitelist(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), "secret-marker") {
 		t.Fatalf("start response leaked secrets: %s", recorder.Body.String())
 	}
+	// The login worker persists the auth file asynchronously. Wait for its
+	// terminal commit before t.TempDir cleanup unlinks the auth directory.
+	waitPlusStatus(t, h.plusOAuthStore(), state, func(view map[string]any) bool {
+		return view["status"] == "ok"
+	})
 }
 
 // TestPlusOAuthHandlersAreIsolated covers the requirement that sessions cannot
