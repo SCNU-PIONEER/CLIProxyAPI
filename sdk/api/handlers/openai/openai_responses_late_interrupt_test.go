@@ -250,3 +250,143 @@ func TestResponsesInterruptDiagnosticsAreSanitized(t *testing.T) {
 		t.Fatal("timeline was not finalized")
 	}
 }
+
+// A terminal HTTP turn must close local cancellation and be remembered: a late
+// interrupt for it is a handled no-op, an unknown ID is a 400, and only the
+// current turn's ID may cancel the next HTTP turn.
+func TestResponsesHTTPTerminalInterruptsUseCurrentTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var requests atomic.Int32
+	httpCanceled := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			t.Error("unexpected websocket upstream for HTTP-only auth")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("response writer does not support flushing")
+			return
+		}
+		switch requests.Add(1) {
+		case 1:
+			if _, errWrite := fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"h1\"}}\n\n"); errWrite != nil {
+				t.Errorf("HTTP created h1: %v", errWrite)
+				return
+			}
+			if _, errWrite := fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"h1\",\"status\":\"completed\"}}\n\n"); errWrite != nil {
+				t.Errorf("HTTP completed h1: %v", errWrite)
+				return
+			}
+			flusher.Flush()
+			<-r.Context().Done()
+		case 2:
+			if _, errWrite := fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"h2\"}}\n\n"); errWrite != nil {
+				t.Errorf("HTTP created h2: %v", errWrite)
+				return
+			}
+			flusher.Flush()
+			<-r.Context().Done()
+			httpCanceled <- struct{}{}
+		default:
+			t.Error("unexpected extra HTTP turn")
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{}
+	cfg.RequestLog = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
+	const authID = "http-terminal-interrupt"
+	const model = "http-terminal-model"
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID: authID, Provider: "codex", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"api_key": "synthetic-key", "base_url": upstream.URL, "websockets": "false"},
+	}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	defer registry.GetGlobalRegistry().UnregisterClient(authID)
+	handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	router := gin.New()
+	router.GET("/v1/responses", func(c *gin.Context) {
+		handler.ResponsesWebsocket(c)
+	})
+	downstream := httptest.NewServer(router)
+	defer downstream.Close()
+	client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
+	if errDial != nil {
+		t.Fatal(errDial)
+	}
+	clientClosed := false
+	defer func() {
+		if !clientClosed {
+			if errClose := client.Close(); errClose != nil {
+				t.Errorf("close client: %v", errClose)
+			}
+		}
+	}()
+	if errDeadline := client.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+		t.Fatal(errDeadline)
+	}
+	send := func(payload string) {
+		t.Helper()
+		if errWrite := client.WriteMessage(websocket.TextMessage, []byte(payload)); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+	}
+	expect := func(event, id string) {
+		t.Helper()
+		_, payload, errRead := client.ReadMessage()
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if gjson.GetBytes(payload, "type").String() != event || gjson.GetBytes(payload, "response.id").String() != id {
+			t.Fatalf("expected %s for %s, got %s", event, id, payload)
+		}
+	}
+
+	send(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]}`, model))
+	expect("response.created", "h1")
+	expect("response.completed", "h1")
+
+	// The completed turn is terminal: h1 is a handled no-op (never a second
+	// incomplete), and an unknown ID is rejected instead of canceling anything.
+	send(`{"type":"response.interrupt","response_id":"h1"}`)
+	send(`{"type":"response.interrupt","response_id":"unknown"}`)
+	expect("error", "")
+
+	send(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]}`, model))
+	expect("response.created", "h2")
+	// Old terminal h1 must not cancel active h2; unknown must be rejected.
+	send(`{"type":"response.interrupt","response_id":"h1"}`)
+	send(`{"type":"response.interrupt","response_id":"unknown"}`)
+	expect("error", "")
+	// Only the current turn's ID cancels the next HTTP turn.
+	send(`{"type":"response.interrupt","response_id":"h2"}`)
+	expect("response.incomplete", "h2")
+	// The locally generated terminal frame is a ledger entry too: a repeated
+	// interrupt for h2 must not surface a second frame, and an unknown ID stays
+	// the only error barrier on the connection.
+	send(`{"type":"response.interrupt","response_id":"h2"}`)
+	send(`{"type":"response.interrupt","response_id":"unknown"}`)
+	expect("error", "")
+	if errDeadline := client.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); errDeadline != nil {
+		t.Fatal(errDeadline)
+	}
+	if _, payload, errRead := client.ReadMessage(); errRead == nil && gjson.GetBytes(payload, "type").String() == "error" {
+		t.Fatalf("repeated h2 interrupt produced a second error frame: %s", payload)
+	}
+	select {
+	case <-httpCanceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("current HTTP turn was not canceled")
+	}
+	if errClose := client.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	clientClosed = true
+}

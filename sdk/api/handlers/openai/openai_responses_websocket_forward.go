@@ -71,15 +71,22 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
+	var localFrames <-chan []byte
 	if opts.localInterrupt != nil {
-		opts.localInterrupt.begin()
+		localFrames = opts.localInterrupt.begin(c.Request.Context())
 		defer opts.localInterrupt.end()
 	}
-	localFrames := opts.localInterrupt.framesChan()
 
 	for {
 		select {
 		case interruptPayload := <-localFrames:
+			// The locally generated terminal frame does not pass through the
+			// payload loop, so record its ID and close delivery before publishing
+			// it: a repeated interrupt for this turn is a ledger no-op, not a 400.
+			if responseID, ok := localInterruptResponseID(interruptPayload); ok {
+				opts.localInterrupt.rememberTerminal(responseID)
+			}
+			opts.localInterrupt.disarm()
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
@@ -170,6 +177,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
+					// A long-lived duplex forward loop can carry more than one
+					// response; open a fresh handoff for the new turn.
+					createdID := ""
+					if responseID := gjson.GetBytes(payloads[i], "response.id"); responseID.Type == gjson.String {
+						createdID = strings.TrimSpace(responseID.String())
+					}
+					localFrames = opts.localInterrupt.rearm(createdID)
 				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
@@ -204,6 +218,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
 				markAPIResponseTimestamp(c)
+				// Record a terminal response before publishing its frame, then close
+				// local cancellation: a later interrupt for the turn is a handled
+				// no-op, never a second incomplete or a cancel of the next turn.
+				opts.localInterrupt.observeTerminal(eventType, payloads[i])
 				if payloadErrMsg != nil {
 					if matched, errClose := writer.closeForUpstreamError(payloadErrMsg.Error); matched {
 						cancel(payloadErrMsg.Error)
