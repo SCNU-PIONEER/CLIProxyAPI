@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2232,14 +2233,18 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	var hookOnce sync.Once
+	var pongDeliveredOnce sync.Once
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
-		select {
-		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
-		}
+		hookOnce.Do(func() {
+			close(inWriteHook)
+			select {
+			case <-pongDeliveredDuringWrite:
+			case <-time.After(2 * time.Second):
+				t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
+			}
+		})
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
 
@@ -2256,10 +2261,16 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
+		var payloadOnce sync.Once
 		go func() {
 			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
+				messageType, _, errReadLoop := conn.ReadMessage()
+				if errReadLoop != nil {
 					return
+				}
+				if messageType == websocket.TextMessage {
+					payloadOnce.Do(func() { close(payloadReceived) })
 				}
 			}
 		}()
@@ -2278,9 +2289,16 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			if got != "xai-session-ping" {
 				t.Errorf("unexpected pong payload: got %q, want xai-session-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		select {
+		case <-payloadReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for request payload after pong delivery")
 			return
 		}
 
@@ -2328,14 +2346,18 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	var hookOnce sync.Once
+	var pongDeliveredOnce sync.Once
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
-		select {
-		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for pong delivery while xai sessionless payload write was held in hook")
-		}
+		hookOnce.Do(func() {
+			close(inWriteHook)
+			select {
+			case <-pongDeliveredDuringWrite:
+			case <-time.After(2 * time.Second):
+				t.Error("timed out waiting for pong delivery while xai sessionless payload write was held in hook")
+			}
+		})
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
 
@@ -2352,10 +2374,16 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
+		var payloadOnce sync.Once
 		go func() {
 			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
+				messageType, _, errReadLoop := conn.ReadMessage()
+				if errReadLoop != nil {
 					return
+				}
+				if messageType == websocket.TextMessage {
+					payloadOnce.Do(func() { close(payloadReceived) })
 				}
 			}
 		}()
@@ -2374,9 +2402,16 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			if got != "xai-sessionless-ping" {
 				t.Errorf("unexpected pong payload: got %q, want xai-sessionless-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		select {
+		case <-payloadReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for request payload after pong delivery")
 			return
 		}
 
