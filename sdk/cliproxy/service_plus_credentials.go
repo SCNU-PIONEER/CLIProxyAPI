@@ -67,12 +67,17 @@ func (s *Service) startPlusCredentialActivation(ctx context.Context, cfg *config
 	if s == nil || cfg == nil {
 		return
 	}
+	watchPaths := kiroTokenFilePaths(cfg)
+	// Subscribe to the token-file directories before snapshotting them: a
+	// rewrite that lands right after activation returns must not fall between
+	// the snapshot and a lazily-started watch. Events raised during the
+	// snapshot are buffered by fsnotify and replayed once the loop starts.
+	tokenWatcher := s.newKiroTokenWatcher(watchPaths)
 	// The Kiro fingerprint configuration is process-wide; refresh it on every
 	// applied config so a reload cannot leave stale identity values behind.
 	kiroauth.InitFingerprintConfig(cfg)
 	kiroAuths := synthesizeKiroConfigAuths(cfg)
 	btEntries := append([]config.BTKey(nil), cfg.BTKey...)
-	watchPaths := kiroTokenFilePaths(cfg)
 
 	desired := make(map[string]struct{}, len(kiroAuths)+len(btEntries))
 	for _, auth := range kiroAuths {
@@ -86,6 +91,9 @@ func (s *Service) startPlusCredentialActivation(ctx context.Context, cfg *config
 	s.plusCredentialMu.Lock()
 	if s.plusCredentialStopped {
 		s.plusCredentialMu.Unlock()
+		if tokenWatcher != nil {
+			_ = tokenWatcher.Close()
+		}
 		return
 	}
 	if s.plusCredentialCancel != nil {
@@ -103,7 +111,7 @@ func (s *Service) startPlusCredentialActivation(ctx context.Context, cfg *config
 	}
 	s.plusCredentialIDs = desired
 	s.plusCredentialWG.Add(1)
-	if len(watchPaths) > 0 {
+	if tokenWatcher != nil {
 		s.plusCredentialWG.Add(1)
 	}
 	s.plusCredentialMu.Unlock()
@@ -120,10 +128,10 @@ func (s *Service) startPlusCredentialActivation(ctx context.Context, cfg *config
 		defer s.plusCredentialWG.Done()
 		s.activatePlusCredentials(activationCtx, generation, kiroAuths, btEntries)
 	}()
-	if len(watchPaths) > 0 {
+	if tokenWatcher != nil {
 		go func() {
 			defer s.plusCredentialWG.Done()
-			s.watchKiroTokenFiles(activationCtx, generation, watchPaths)
+			s.watchKiroTokenFiles(activationCtx, generation, watchPaths, tokenWatcher)
 		}()
 	}
 	_ = ctx
@@ -810,18 +818,18 @@ func kiroTokenPathMatches(paths []string, name string) bool {
 	return false
 }
 
-func (s *Service) watchKiroTokenFiles(ctx context.Context, generation uint64, paths []string) {
+// newKiroTokenWatcher subscribes to every distinct parent directory of the
+// configured token files. It returns nil when there is nothing to watch or no
+// directory could be watched.
+func (s *Service) newKiroTokenWatcher(paths []string) *fsnotify.Watcher {
+	if len(paths) == 0 {
+		return nil
+	}
 	fileWatcher, errNew := fsnotify.NewWatcher()
 	if errNew != nil {
 		log.Warnf("kiro token file watch: %v", errNew)
-		return
+		return nil
 	}
-	defer func() {
-		if errClose := fileWatcher.Close(); errClose != nil {
-			log.Debugf("kiro token file watch close: %v", errClose)
-		}
-	}()
-
 	dirs := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		dir := filepath.Dir(path)
@@ -835,8 +843,23 @@ func (s *Service) watchKiroTokenFiles(ctx context.Context, generation uint64, pa
 		dirs[dir] = struct{}{}
 	}
 	if len(dirs) == 0 {
+		if errClose := fileWatcher.Close(); errClose != nil {
+			log.Debugf("kiro token file watch close: %v", errClose)
+		}
+		return nil
+	}
+	return fileWatcher
+}
+
+func (s *Service) watchKiroTokenFiles(ctx context.Context, generation uint64, paths []string, fileWatcher *fsnotify.Watcher) {
+	if fileWatcher == nil {
 		return
 	}
+	defer func() {
+		if errClose := fileWatcher.Close(); errClose != nil {
+			log.Debugf("kiro token file watch close: %v", errClose)
+		}
+	}()
 
 	var debounce *time.Timer
 	var debounceC <-chan time.Time

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -417,6 +418,56 @@ func TestKiroTokenFileChangeReactivatesConfigCredential(t *testing.T) {
 		case <-ticker.C:
 		case <-deadline.C:
 			t.Fatal("token file change was not applied without a config reload")
+		}
+	}
+}
+
+// TestKiroTokenFileChangeImmediatelyAfterActivation pins the production
+// subscribe-before-snapshot guarantee: a token-file rewrite issued as soon as
+// startPlusCredentialActivation returns must still be observed.
+// GOMAXPROCS=1 increases pressure on lazy watcher startup. The test deliberately
+// does not wait for watcher readiness before rewriting the file.
+func TestKiroTokenFileChangeImmediatelyAfterActivation(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "kiro-token.json")
+	writeToken := func(accessToken string) {
+		t.Helper()
+		body := `{"accessToken":"` + accessToken + `","refreshToken":"refresh-value","profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/test","region":"us-east-1"}`
+		if errWrite := os.WriteFile(tokenPath, []byte(body), 0o600); errWrite != nil {
+			t.Fatalf("write token file: %v", errWrite)
+		}
+	}
+	writeToken("first-access")
+
+	cfg := &config.Config{KiroKey: []config.KiroKey{{TokenFile: tokenPath}}}
+	svc := &Service{cfg: cfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	svc.startPlusCredentialActivation(ctx, cfg)
+	defer svc.stopPlusCredentialActivation()
+
+	// Rewrite without waiting for the watcher goroutine to report readiness.
+	writeToken("second-access")
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		auths := synthesizeKiroConfigAuths(cfg)
+		if len(auths) == 1 {
+			if current, ok := svc.coreManager.GetByID(auths[0].ID); ok && metaString(current.Metadata["access_token"]) == "second-access" {
+				return
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("token file rewrite right after activation was not observed")
 		}
 	}
 }
