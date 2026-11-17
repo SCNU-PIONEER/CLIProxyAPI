@@ -196,16 +196,37 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// SensitivePatternRule is an ordered Go RE2 regex replacement applied to system prompts.
+type SensitivePatternRule struct {
+	// Pattern is the Go RE2 regular expression to match.
+	Pattern string `yaml:"pattern" json:"pattern"`
+
+	// Replacement is the substitution string (empty string deletes matches).
+	Replacement string `yaml:"replacement" json:"replacement"`
+}
+
 // DevinConfig configures provider-wide Devin request behavior.
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system prompts.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules for system prompts.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 }
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system instructions.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules for system instructions.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
@@ -585,6 +606,12 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
