@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2298,7 +2299,6 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
-	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
 	var hookOnce sync.Once
 	var pongDeliveredOnce sync.Once
@@ -2331,7 +2331,6 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		payloadReceived := make(chan struct{})
 		var payloadOnce sync.Once
 		go func() {
-			signaled := false
 			for {
 				messageType, _, errReadLoop := conn.ReadMessage()
 				if errReadLoop != nil {
@@ -2413,7 +2412,6 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
-	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
 	var hookOnce sync.Once
 	var pongDeliveredOnce sync.Once
@@ -2446,7 +2444,6 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		payloadReceived := make(chan struct{})
 		var payloadOnce sync.Once
 		go func() {
-			signaled := false
 			for {
 				messageType, _, errReadLoop := conn.ReadMessage()
 				if errReadLoop != nil {

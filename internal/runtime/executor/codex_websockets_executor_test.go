@@ -2674,11 +2674,9 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		})
 
 		payloadReceived := make(chan struct{})
-		var payloadSeen atomic.Bool
 		// Start server reader loop so server processes control frames and records
 		// that the client request payload has fully arrived before replying.
 		readErrCh := make(chan error, 1)
-		payloadReceived := make(chan struct{})
 		go func() {
 			signaled := false
 			for {
@@ -2686,7 +2684,8 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 					readErrCh <- errRead
 					return
 				}
-				if payloadSeen.CompareAndSwap(false, true) {
+				if !signaled {
+					signaled = true
 					close(payloadReceived)
 				}
 			}
@@ -2800,7 +2799,6 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		// The reader records that the client request payload has fully arrived;
 		// the reply must not race the paused upload.
 		go func() {
-			signaled := false
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
@@ -2915,7 +2913,6 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		// The reader records that the client request payload has fully arrived;
 		// the reply must not race the paused upload.
 		go func() {
-			signaled := false
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return

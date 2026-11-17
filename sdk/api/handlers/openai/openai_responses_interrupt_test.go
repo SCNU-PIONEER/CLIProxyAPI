@@ -271,7 +271,9 @@ func (e *homeInterruptExecutor) InterruptExecutionSession(ctx context.Context, s
 
 type blockingHTTPInterruptExecutor struct {
 	calls      atomic.Int32
+	canceled   atomic.Bool
 	canceledCh chan struct{}
+	cancelOnce sync.Once
 }
 
 func (*blockingHTTPInterruptExecutor) Identifier() string { return "codex" }
