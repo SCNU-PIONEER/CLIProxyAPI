@@ -71,11 +71,32 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			opts.onDownstreamCommit()
 		}
 	}
-	var localFrames <-chan []byte
 	if opts.localInterrupt != nil {
-		localFrames = opts.localInterrupt.begin(c.Request.Context())
-		defer opts.localInterrupt.end()
+		websocketOwned := opts.websocketOwned != nil && opts.websocketOwned()
+		opts.localInterrupt.begin(websocketOwned)
+		if websocketOwned {
+			defer opts.localInterrupt.endWebsocketTurn()
+		}
+		defer func() {
+			opts.localInterrupt.end()
+			// The reader may have claimed a frame in the gap between the
+			// last loop iteration and this return. It already logged the
+			// frame as locally handled, so answer it here instead of
+			// dropping it; otherwise the client waits for a reply that
+			// never comes. Frames claimed while the socket or request is
+			// already gone need no answer.
+			if c.Request.Context().Err() == nil {
+				if claimed := opts.localInterrupt.takeClaimed(); claimed != nil {
+					markDownstreamCommitted()
+					_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+						StatusCode: http.StatusBadRequest,
+						Error:      errors.New("no active response to interrupt"),
+					})
+				}
+			}
+		}()
 	}
+	localFrames := opts.localInterrupt.framesChan()
 
 	// handleErr ends the turn on a terminal stream error (non-nil errMsg).
 	handleErr := func(errMsg *interfaces.ErrorMessage) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
@@ -110,13 +131,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	for {
 		select {
 		case interruptPayload := <-localFrames:
-			// The locally generated terminal frame does not pass through the
-			// payload loop, so record its ID and close delivery before publishing
-			// it: a repeated interrupt for this turn is a ledger no-op, not a 400.
-			if responseID, ok := localInterruptResponseID(interruptPayload); ok {
-				opts.localInterrupt.rememberTerminal(responseID)
+			if turnEnded {
+				// The frame was claimed before the terminal payload landed, so
+				// the reader already told the client it was handled locally.
+				// The response is over: reject instead of fabricating an
+				// incomplete event, and keep waiting for the turn to drain.
+				if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      errors.New("no active response to interrupt"),
+				}); errWrite != nil {
+					cancel(errWrite)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+				}
+				continue
 			}
-			opts.localInterrupt.disarm()
+			markDownstreamCommitted()
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cause := context.Cause(c.Request.Context())
@@ -213,13 +242,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
-					// A long-lived duplex forward loop can carry more than one
-					// response; open a fresh handoff for the new turn.
-					createdID := ""
-					if responseID := gjson.GetBytes(payloads[i], "response.id"); responseID.Type == gjson.String {
-						createdID = strings.TrimSpace(responseID.String())
-					}
-					localFrames = opts.localInterrupt.rearm(createdID)
 				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
@@ -270,10 +292,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					turnEnded = true
 				}
 				markAPIResponseTimestamp(c)
-				// Record a terminal response before publishing its frame, then close
-				// local cancellation: a later interrupt for the turn is a handled
-				// no-op, never a second incomplete or a cancel of the next turn.
-				opts.localInterrupt.observeTerminal(eventType, payloads[i])
 				if payloadErrMsg != nil {
 					if matched, errClose := writer.closeForUpstreamError(payloadErrMsg.Error); matched {
 						cancel(payloadErrMsg.Error)

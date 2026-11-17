@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/MoeForge/moego/json"
@@ -44,17 +43,6 @@ func (m *Manager) Register(a Authenticator) {
 		m.authenticators = make(map[string]Authenticator)
 	}
 	m.authenticators[a.Provider()] = a
-}
-
-// Authenticator returns the registered authenticator for provider. Registration
-// happens during manager construction; the lookup itself does not take a lock,
-// matching Login and ListProviders.
-func (m *Manager) Authenticator(provider string) (Authenticator, bool) {
-	if m == nil || m.authenticators == nil {
-		return nil, false
-	}
-	authenticator, ok := m.authenticators[provider]
-	return authenticator, ok
 }
 
 // SetStore updates the token store used for persistence.
@@ -184,154 +172,66 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	return record, savedPath, nil
 }
 
-type ProviderInfo struct {
-	Key             string   `json:"key"`
-	DisplayName     string   `json:"display_name"`
-	FlowType        string   `json:"flow_type"`
-	AuthURLEndpoint string   `json:"auth_url_endpoint"`
-	Aliases         []string `json:"aliases,omitempty"`
-	Configured      bool     `json:"configured"`
+func configWithLoginProxy(cfg *config.Config, proxyURL string) *config.Config {
+	if cfg == nil {
+		return &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxyURL}}
+	}
+	cloned := cfg.CloneForRuntime()
+	if cloned == nil {
+		copied := *cfg
+		cloned = &copied
+	}
+	cloned.ProxyURL = proxyURL
+	return cloned
 }
 
-var providerMetadata = map[string]ProviderInfo{
-	"claude": {
-		Key:             "claude",
-		DisplayName:     "Claude (Anthropic)",
-		FlowType:        "authorization_code_pkce",
-		AuthURLEndpoint: "/anthropic-auth-url",
-		Aliases:         []string{"anthropic"},
-	},
-	"codex": {
-		Key:             "codex",
-		DisplayName:     "Codex (OpenAI)",
-		FlowType:        "authorization_code_pkce",
-		AuthURLEndpoint: "/codex-auth-url",
-		Aliases:         []string{"openai"},
-	},
-	"gemini": {
-		Key:             "gemini",
-		DisplayName:     "Gemini CLI",
-		FlowType:        "google_oauth2",
-		AuthURLEndpoint: "/gemini-cli-auth-url",
-		Aliases:         []string{"google"},
-	},
-	"antigravity": {
-		Key:             "antigravity",
-		DisplayName:     "Antigravity",
-		FlowType:        "google_oauth2",
-		AuthURLEndpoint: "/antigravity-auth-url",
-		Aliases:         []string{"anti-gravity"},
-	},
-	"kimi": {
-		Key:             "kimi",
-		DisplayName:     "Kimi",
-		FlowType:        "device_code",
-		AuthURLEndpoint: "/kimi-auth-url",
-	},
-	"kiro": {
-		Key:             "kiro",
-		DisplayName:     "Kiro",
-		FlowType:        "aws_builder_id",
-		AuthURLEndpoint: "/kiro-auth-url",
-	},
-	"github-copilot": {
-		Key:             "github-copilot",
-		DisplayName:     "GitHub Copilot",
-		FlowType:        "device_code",
-		AuthURLEndpoint: "/github-auth-url",
-		Aliases:         []string{"github"},
-	},
-	"gitlab": {
-		Key:             "gitlab",
-		DisplayName:     "GitLab",
-		FlowType:        "authorization_code_pkce",
-		AuthURLEndpoint: "/gitlab-auth-url",
-	},
-	"codebuddy": {
-		Key:             "codebuddy",
-		DisplayName:     "CodeBuddy",
-		FlowType:        "token",
-		AuthURLEndpoint: "",
-	},
-	"codebuddy-ai": {
-		Key:             "codebuddy-ai",
-		DisplayName:     "CodeBuddy AI",
-		FlowType:        "token",
-		AuthURLEndpoint: "",
-	},
-	"cursor": {
-		Key:             "cursor",
-		DisplayName:     "Cursor",
-		FlowType:        "pkce_polling",
-		AuthURLEndpoint: "/cursor-auth-url",
-	},
-	"qoder": {
-		Key:             "qoder",
-		DisplayName:     "Qoder",
-		FlowType:        "pkce_custom_uri",
-		AuthURLEndpoint: "/qoder-auth-url",
-	},
-	"codearts": {
-		Key:             "codearts",
-		DisplayName:     "CodeArts",
-		FlowType:        "web_oauth",
-		AuthURLEndpoint: "",
-	},
-	"joycode": {
-		Key:             "joycode",
-		DisplayName:     "JoyCode",
-		FlowType:        "web_oauth",
-		AuthURLEndpoint: "",
-	},
-	"kilo": {
-		Key:             "kilo",
-		DisplayName:     "Kilo",
-		FlowType:        "device_code",
-		AuthURLEndpoint: "/kilo-auth-url",
-	},
+func applyLoginProxyToRecord(record *coreauth.Auth, proxyURL string) {
+	if record == nil || proxyURL == "" {
+		return
+	}
+	record.ProxyURL = proxyURL
+	if record.Metadata == nil {
+		record.Metadata = make(map[string]any)
+	}
+	record.Metadata["proxy_url"] = proxyURL
+	if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+		setter.SetMetadata(record.Metadata)
+	}
 }
 
-func (m *Manager) ListProviders() []ProviderInfo {
-	configuredKeys := make(map[string]bool)
-	if m.authenticators != nil {
-		for key := range m.authenticators {
-			configuredKeys[key] = true
-		}
-	}
-
-	seen := make(map[string]bool)
-	result := make([]ProviderInfo, 0, len(providerMetadata)+len(configuredKeys))
-
-	for key, info := range providerMetadata {
-		info.Configured = configuredKeys[key]
-		result = append(result, info)
-		seen[key] = true
-	}
-
-	for key := range configuredKeys {
-		if !seen[key] {
-			result = append(result, ProviderInfo{
-				Key:         key,
-				DisplayName: key,
-				FlowType:    "unknown",
-				Configured:  true,
-			})
-		}
-	}
-
-	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
-	return result
+func metadataStringValue(metadata map[string]any, key string) string {
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
 }
 
-// SaveAuth persists an auth record using the configured store.
-func (m *Manager) SaveAuth(record *coreauth.Auth, cfg *config.Config) (string, error) {
-	if m.store == nil {
-		return "", fmt.Errorf("no store configured")
+// adoptLegacyXAIFileName points a subject-only xAI record at the existing
+// email-named credential so the save refreshes that file in place. The token
+// storage email is backfilled because SaveTokenToFile merges the record
+// metadata over the serialized storage and would otherwise drop the email.
+// Path attributes pointing at the superseded subject-named file are cleared
+// so the store resolves the adopted name.
+func adoptLegacyXAIFileName(record, legacy *coreauth.Auth) {
+	legacyFileName := strings.TrimSpace(legacy.FileName)
+	if legacyFileName == "" {
+		legacyFileName = strings.TrimSpace(legacy.ID)
 	}
-	if cfg != nil {
-		if dirSetter, ok := m.store.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(cfg.AuthDir)
+	if legacyFileName == "" {
+		return
+	}
+	oldBaseName := filepath.Base(strings.TrimSpace(record.FileName))
+	if oldBaseName == "" || oldBaseName == "." {
+		oldBaseName = filepath.Base(strings.TrimSpace(record.ID))
+	}
+	record.ID = legacyFileName
+	record.FileName = legacyFileName
+	if storage, ok := record.Storage.(*xaiauth.TokenStorage); ok && storage != nil {
+		if email := metadataStringValue(legacy.Metadata, "email"); email != "" {
+			storage.Email = email
 		}
 	}
-	return m.store.Save(context.Background(), record)
+	for key, value := range record.Attributes {
+		if strings.TrimSpace(value) != "" && strings.EqualFold(filepath.Base(strings.TrimSpace(value)), oldBaseName) {
+			delete(record.Attributes, key)
+		}
+	}
 }

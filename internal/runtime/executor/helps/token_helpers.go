@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
@@ -47,7 +46,7 @@ func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 		return 0, nil
 	}
 
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := gjson.ParseBytes(payload)
 	segments := make([]string, 0, 32)
 
 	collectOpenAIMessages(root.Get("messages"), &segments)
@@ -75,11 +74,11 @@ func BuildOpenAIUsageJSON(count int64) []byte {
 	return []byte(fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0,"total_tokens":%d}}`, count, count))
 }
 
-func collectOpenAIMessages(messages ojson.Result, segments *[]string) {
+func collectOpenAIMessages(messages gjson.Result, segments *[]string) {
 	if !messages.Exists() || !messages.IsArray() {
 		return
 	}
-	messages.ForEach(func(_, message ojson.Result) bool {
+	messages.ForEach(func(_, message gjson.Result) bool {
 		addIfNotEmpty(segments, message.Get("role").String())
 		addIfNotEmpty(segments, message.Get("name").String())
 		collectOpenAIContent(message.Get("content"), segments)
@@ -89,16 +88,16 @@ func collectOpenAIMessages(messages ojson.Result, segments *[]string) {
 	})
 }
 
-func collectOpenAIContent(content ojson.Result, segments *[]string) {
+func collectOpenAIContent(content gjson.Result, segments *[]string) {
 	if !content.Exists() {
 		return
 	}
-	if content.Type == ojson.String {
+	if content.Type == gjson.String {
 		addIfNotEmpty(segments, content.String())
 		return
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part ojson.Result) bool {
+		content.ForEach(func(_, part gjson.Result) bool {
 			partType := part.Get("type").String()
 			switch partType {
 			case "text", "input_text", "output_text":
@@ -115,7 +114,7 @@ func collectOpenAIContent(content ojson.Result, segments *[]string) {
 					collectOpenAIContent(part, segments)
 					return true
 				}
-				if part.Type == ojson.JSON {
+				if part.Type == gjson.JSON {
 					addIfNotEmpty(segments, part.Raw)
 					return true
 				}
@@ -125,16 +124,16 @@ func collectOpenAIContent(content ojson.Result, segments *[]string) {
 		})
 		return
 	}
-	if content.Type == ojson.JSON {
+	if content.Type == gjson.JSON {
 		addIfNotEmpty(segments, content.Raw)
 	}
 }
 
-func collectOpenAIToolCalls(calls ojson.Result, segments *[]string) {
+func collectOpenAIToolCalls(calls gjson.Result, segments *[]string) {
 	if !calls.Exists() || !calls.IsArray() {
 		return
 	}
-	calls.ForEach(func(_, call ojson.Result) bool {
+	calls.ForEach(func(_, call gjson.Result) bool {
 		addIfNotEmpty(segments, call.Get("id").String())
 		addIfNotEmpty(segments, call.Get("type").String())
 		function := call.Get("function")
@@ -150,7 +149,7 @@ func collectOpenAIToolCalls(calls ojson.Result, segments *[]string) {
 	})
 }
 
-func collectOpenAIFunctionCall(call ojson.Result, segments *[]string) {
+func collectOpenAIFunctionCall(call gjson.Result, segments *[]string) {
 	if !call.Exists() {
 		return
 	}
@@ -158,12 +157,12 @@ func collectOpenAIFunctionCall(call ojson.Result, segments *[]string) {
 	addIfNotEmpty(segments, call.Get("arguments").String())
 }
 
-func collectOpenAITools(tools ojson.Result, segments *[]string) {
+func collectOpenAITools(tools gjson.Result, segments *[]string) {
 	if !tools.Exists() {
 		return
 	}
 	if tools.IsArray() {
-		tools.ForEach(func(_, tool ojson.Result) bool {
+		tools.ForEach(func(_, tool gjson.Result) bool {
 			appendToolPayload(tool, segments)
 			return true
 		})
@@ -172,11 +171,11 @@ func collectOpenAITools(tools ojson.Result, segments *[]string) {
 	appendToolPayload(tools, segments)
 }
 
-func collectOpenAIFunctions(functions ojson.Result, segments *[]string) {
+func collectOpenAIFunctions(functions gjson.Result, segments *[]string) {
 	if !functions.Exists() || !functions.IsArray() {
 		return
 	}
-	functions.ForEach(func(_, function ojson.Result) bool {
+	functions.ForEach(func(_, function gjson.Result) bool {
 		addIfNotEmpty(segments, function.Get("name").String())
 		addIfNotEmpty(segments, function.Get("description").String())
 		if params := function.Get("parameters"); params.Exists() {
@@ -186,18 +185,18 @@ func collectOpenAIFunctions(functions ojson.Result, segments *[]string) {
 	})
 }
 
-func collectOpenAIToolChoice(choice ojson.Result, segments *[]string) {
+func collectOpenAIToolChoice(choice gjson.Result, segments *[]string) {
 	if !choice.Exists() {
 		return
 	}
-	if choice.Type == ojson.String {
+	if choice.Type == gjson.String {
 		addIfNotEmpty(segments, choice.String())
 		return
 	}
 	addIfNotEmpty(segments, choice.Raw)
 }
 
-func collectOpenAIResponseFormat(format ojson.Result, segments *[]string) {
+func collectOpenAIResponseFormat(format gjson.Result, segments *[]string) {
 	if !format.Exists() {
 		return
 	}
@@ -211,7 +210,7 @@ func collectOpenAIResponseFormat(format ojson.Result, segments *[]string) {
 	}
 }
 
-func appendToolPayload(tool ojson.Result, segments *[]string) {
+func appendToolPayload(tool gjson.Result, segments *[]string) {
 	if !tool.Exists() {
 		return
 	}
