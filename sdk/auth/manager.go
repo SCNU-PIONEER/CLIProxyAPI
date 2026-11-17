@@ -2,16 +2,18 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.
@@ -67,6 +69,17 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		return nil, "", fmt.Errorf("cliproxy auth: authenticator %s not registered", provider)
 	}
 
+	loginProxyURL := ""
+	if opts != nil {
+		loginProxyURL = strings.TrimSpace(opts.ProxyURL)
+	}
+	if loginProxyURL != "" {
+		if !proxyutil.ValidRequestProxy(loginProxyURL) {
+			return nil, "", fmt.Errorf("cliproxy auth: invalid login proxy URL %q", proxyutil.Redact(loginProxyURL))
+		}
+		cfg = configWithLoginProxy(cfg, loginProxyURL)
+	}
+
 	record, err := auth.Login(ctx, cfg, opts)
 	if err != nil {
 		return nil, "", err
@@ -106,6 +119,39 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	if legacyClaudeCredential != nil {
 		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
 	}
+	legacyXAICredential, errLegacyXAI := xaiauth.FindMatchingLegacyCredential(ctx, m.store, record)
+	if errLegacyXAI != nil {
+		return record, "", errLegacyXAI
+	}
+	adoptXAICredential := legacyXAICredential != nil && record != nil &&
+		strings.EqualFold(strings.TrimSpace(record.Provider), "xai") &&
+		metadataStringValue(record.Metadata, "email") == "" &&
+		metadataStringValue(record.Metadata, "sub") != "" &&
+		metadataStringValue(legacyXAICredential.Metadata, "email") != ""
+	if adoptXAICredential {
+		// The upstream stopped returning the email; keep the account on its
+		// richer email-named credential (richest-known name wins) so the next
+		// login that returns the email finds the same file again. Renaming is
+		// limited to stores that resolve the save path from the record name;
+		// every built-in backend (file, git, Postgres, object) exposes the
+		// SetBaseDir capability, so unknown stores keep the ordinary
+		// migration instead of risking a rename they cannot honor.
+		if _, isFileNameStore := m.store.(interface{ SetBaseDir(string) }); !isFileNameStore {
+			adoptXAICredential = false
+		} else if disabled, hasDisabled := record.Metadata["disabled"].(bool); hasDisabled && disabled {
+			// The destination file deliberately disables this credential; renaming
+			// would leave it disabled while the richer file gets deleted, losing
+			// the operator's opt-out and the saved credential on re-login.
+			adoptXAICredential = false
+		}
+	}
+	if legacyXAICredential != nil {
+		coreauth.MergeExistingAuthMetadata(record, legacyXAICredential.Metadata)
+	}
+	if adoptXAICredential {
+		adoptLegacyXAIFileName(record, legacyXAICredential)
+	}
+	applyLoginProxyToRecord(record, loginProxyURL)
 
 	savedPath, err := m.store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if err != nil {
@@ -121,6 +167,18 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		}
 		if errDelete := m.store.Delete(ctx, legacyID); errDelete != nil {
 			return record, savedPath, fmt.Errorf("cliproxy auth: canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
+		}
+	}
+	if legacyXAICredential != nil && !adoptXAICredential {
+		if strings.TrimSpace(savedPath) == "" {
+			return record, "", fmt.Errorf("cliproxy auth: canonical xAI credential was not persisted; legacy credential retained")
+		}
+		legacyID := strings.TrimSpace(legacyXAICredential.ID)
+		if legacyID == "" {
+			legacyID = strings.TrimSpace(legacyXAICredential.FileName)
+		}
+		if errDelete := m.store.Delete(ctx, legacyID); errDelete != nil {
+			return record, savedPath, fmt.Errorf("cliproxy auth: canonical xAI credential saved but legacy credential cleanup failed: %w", errDelete)
 		}
 	}
 	return record, savedPath, nil

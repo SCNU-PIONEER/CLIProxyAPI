@@ -4,19 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
@@ -208,10 +209,24 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	}
 }
 
+// takeClaimed consumes a queued claimed frame without blocking. The caller
+// becomes responsible for answering it exactly once.
+func (s *responsesLocalInterrupt) takeClaimed() []byte {
+	if s == nil {
+		return nil
+	}
+	select {
+	case frame := <-s.frames:
+		return frame
+	default:
+		return nil
+	}
+}
+
 // readResponsesWebsocketInput is the only downstream reader. Interrupts are
 // handled immediately so they are not queued behind an active response.
 // The bounded queue backpressures clients instead of retaining unlimited input.
-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
+func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender, epoch *atomic.Uint64) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
 	done := make(chan struct{})
 	go func() {
@@ -223,12 +238,13 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 				cancel(errRead)
 				return
 			}
+			msgEpoch := epoch.Load()
 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
 				continue
 			}
 			// Control frames bypass response.create normalization. The original
 			// response_id, mode, and extension fields must reach upstream unchanged.
-			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
+			if json.Valid(payload) && ojson.GetBytesNoCopy(payload, "type").String() == "response.interrupt" {
 				appendResponsesInterruptDiagnostic(timeline, payload, "")
 				errInterrupt := interrupt(payload)
 				switch {
@@ -260,8 +276,9 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 					continue
 				}
 			}
+			message := cliproxyexecutor.WebsocketInput{Payload: payload, Epoch: msgEpoch}
 			select {
-			case input <- cliproxyexecutor.WebsocketInput{Payload: payload}:
+			case input <- message:
 			case <-ctx.Done():
 				return
 			}
@@ -276,7 +293,7 @@ func appendResponsesInterruptDiagnostic(timeline websocketTimelineAppender, payl
 	}
 	// Hash client-controlled IDs and omit all arbitrary fields, including mode.
 	// Only correlation metadata is needed to diagnose control-frame timing.
-	idHash := sha256.Sum256([]byte(gjson.GetBytes(payload, "response_id").String()))
+	idHash := sha256.Sum256([]byte(ojson.GetBytesNoCopy(payload, "response_id").String()))
 	diagnostic := struct {
 		Type           string `json:"type"`
 		ResponseIDHash string `json:"response_id_hash"`
@@ -294,8 +311,8 @@ func appendResponsesInterruptDiagnostic(timeline websocketTimelineAppender, payl
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketInterrupt(ctx context.Context, sessionID string, payload []byte) error {
-	responseID := gjson.GetBytes(payload, "response_id")
-	if responseID.Type != gjson.String || strings.TrimSpace(responseID.String()) == "" {
+	responseID := ojson.GetBytesNoCopy(payload, "response_id")
+	if responseID.Type != ojson.String || strings.TrimSpace(responseID.String()) == "" {
 		return fmt.Errorf("response.interrupt requires response_id")
 	}
 	if h == nil || h.AuthManager == nil {

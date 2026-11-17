@@ -272,6 +272,8 @@ func loadConfigOptionalBytes(data []byte, optional bool, configFile string) (*Co
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
 
+	cfg.KVStore.Path = strings.TrimSpace(cfg.KVStore.Path)
+
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
 	}
@@ -323,6 +325,10 @@ func loadConfigOptionalBytes(data []byte, optional bool, configFile string) (*Co
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
+
+	// Sanitize Antigravity and Devin sensitive-word replacement maps.
+	cfg.SanitizeAntigravity()
+	cfg.SanitizeDevin()
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
