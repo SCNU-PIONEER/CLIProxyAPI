@@ -85,6 +85,7 @@ func buildV8Paths() []configPath {
 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},
 		{"proxy-url", "requests.proxy-url"}, {"tls-handshake-timeout-seconds", "requests.tls-handshake-timeout-seconds"}, {"passthrough-headers", "requests.passthrough-headers"},
 		{"nonstream-keepalive-interval", "requests.nonstream-keepalive-interval"}, {"streaming", "requests.streaming"}, {"payload", "requests.payload"},
+		{"response-compression", "server.response-compression"},
 		{"kiro", "credentials.kiro"}, {"bt", "credentials.bt"},
 		{"kiro-fingerprint", "oauth.providers.kiro.fingerprint"},
 		{"kiro-preferred-endpoint", "oauth.providers.kiro.preferred-endpoint"},

@@ -3,6 +3,7 @@ package management
 import (
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 
@@ -26,7 +27,7 @@ const ConfigV8ContextKey = "management.config-v8"
 func (h *Handler) ConfigV8(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	raw, err := config.ReadConfigFile(h.configFilePath)
+	raw, err := os.ReadFile(h.configFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
 		return
@@ -203,7 +204,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// disk. If it cannot be read back, omit the ETag instead of guessing one.
 	// Like Home, SourceHash keeps its runtime owner and is published by the
 	// reload, so it is not overwritten on next here.
-	if saved, errSaved := config.ReadConfigFile(h.configFilePath); errSaved == nil {
+	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
 		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
 	}
 	prevSecretHash := ""

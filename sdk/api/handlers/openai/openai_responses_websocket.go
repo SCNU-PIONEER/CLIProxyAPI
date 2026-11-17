@@ -152,9 +152,9 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	}
 	if !w.writeMu.TryLock() {
 		deadline := time.Now().Add(wsCloseFallbackWriteTimeout)
-		errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, deadline)
+		_ = w.conn.WriteControl(websocket.CloseMessage, payload, deadline)
 		_ = w.conn.Close()
-		return true, errWrite
+		return true, nil
 	}
 	defer w.writeMu.Unlock()
 

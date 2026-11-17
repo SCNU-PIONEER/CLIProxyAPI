@@ -58,6 +58,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/credentials/verify", s.mgmt.VerifyAuthFileV8)
 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
+	v8.POST("/oauth/auth-url", s.mgmt.StartOAuthV8)
 	v8.GET("/oauth/providers", s.mgmt.GetOAuthProvidersV8)
 	v8.POST("/oauth/session/input", s.mgmt.PostOAuthSessionInput)
 	v8.POST("/oauth/siwc/bind", s.mgmt.StartSIWCBind)

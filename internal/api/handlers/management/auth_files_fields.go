@@ -1134,8 +1134,13 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
 	} else if h.authManager != nil && strings.TrimSpace(savedPath) != "" {
-		if errReg := h.registerAuthFromFileWithID(ctx, savedPath, nil, record.ID); errReg != nil {
-			return savedPath, fmt.Errorf("register persisted auth failed: %w", errReg)
+		// Only file-backed stores expose the record as a path; memory and remote
+		// stores report a name that cannot be re-read, and the runtime adopts
+		// those credentials through the persist hook instead.
+		if _, errStat := os.Stat(savedPath); errStat == nil {
+			if errReg := h.registerAuthFromFileWithID(ctx, savedPath, nil, record.ID); errReg != nil {
+				return savedPath, fmt.Errorf("register persisted auth failed: %w", errReg)
+			}
 		}
 	}
 	return savedPath, nil

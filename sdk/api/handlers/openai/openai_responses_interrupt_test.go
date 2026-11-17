@@ -304,7 +304,12 @@ func (e *blockingHTTPInterruptExecutor) ExecuteStream(ctx context.Context, _ *co
 		}
 		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"r-http"}}`)}
 		<-ctx.Done()
-		close(e.canceledCh)
+		e.canceled.Store(true)
+		e.cancelOnce.Do(func() {
+			if e.canceledCh != nil {
+				close(e.canceledCh)
+			}
+		})
 	}()
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
