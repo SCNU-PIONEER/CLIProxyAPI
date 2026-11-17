@@ -47,6 +47,10 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// proxyPoolPublisher scopes connection-pool fencing to this service, so a reload
+	// here never retires config snapshots served by another service.
+	proxyPoolPublisher uint64
+
 	// plusCredentialMu guards the config-driven Plus credential activator' state.
 	plusCredentialMu         sync.Mutex
 	plusCredentialGeneration uint64
