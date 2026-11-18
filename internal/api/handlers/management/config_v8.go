@@ -1,12 +1,13 @@
 package management
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -26,7 +27,7 @@ const ConfigV8ContextKey = "management.config-v8"
 func (h *Handler) ConfigV8(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	raw, err := config.ReadConfigFile(h.configFilePath)
+	raw, err := os.ReadFile(h.configFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
 		return
@@ -203,10 +204,21 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// disk. If it cannot be read back, omit the ETag instead of guessing one.
 	// Like Home, SourceHash keeps its runtime owner and is published by the
 	// reload, so it is not overwritten on next here.
-	if saved, errSaved := config.ReadConfigFile(h.configFilePath); errSaved == nil {
+	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
 		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
 	}
+	prevSecretHash := ""
+	if h.cfg != nil {
+		prevSecretHash = h.cfg.RemoteManagement.SecretKey
+	}
 	h.cfg = next
+	nextSecretHash := ""
+	if next != nil {
+		nextSecretHash = next.RemoteManagement.SecretKey
+	}
+	if prevSecretHash != nextSecretHash {
+		h.authCache.invalidate()
+	}
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})

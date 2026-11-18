@@ -19,6 +19,7 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	ProxyURL     string
 	// OnChallenge receives browser/device instructions instead of printing them.
 	OnChallenge func(LoginChallenge)
 }
